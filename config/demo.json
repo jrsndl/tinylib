@@ -1,0 +1,29 @@
+{
+  "libraries": [
+    {
+      "name": "Demo footage",
+      "root": "../testdata/demolib",
+      "legacy_roots": [
+        "X:/legacy-assets"
+      ],
+      "read_only": true
+    },
+    {
+      "name": "HDRI",
+      "root": "../testdata/hdrilib",
+      "read_only": true
+    }
+  ],
+  "colorspaces": [
+    "ACEScg",
+    "Utility - Linear - sRGB",
+    "Output - Rec.709"
+  ],
+  "tools": {
+    "ffmpeg": "../executables/ffmpeg/ffmpeg.exe",
+    "ffprobe": "../executables/ffmpeg/ffprobe.exe",
+    "oiiotool": "../executables/oiio2/oiiotool.exe"
+  },
+  "profiles": {},
+  "deadline": {}
+}

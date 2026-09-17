@@ -1,0 +1,64 @@
+{
+  "libraries": [
+    {
+      "name": "Elements",
+      "root": "../library",
+      "read_only": true
+    }
+  ],
+  "colorspaces": [
+    "ACES - ACEScg",
+    "ACES - ACES2065-1",
+    "Utility - Linear - sRGB",
+    "Output - Rec.709"
+  ],
+  "tools": {
+    "ffmpeg": "ffmpeg",
+    "ffprobe": "ffprobe",
+    "oiiotool": "oiiotool",
+    "vfx_transcode": "vfx-transcode"
+  },
+  "profiles": {
+    "ACES to Rec.709": {
+      "description": "Studio ACES 1.2 conversion; largest source frame as thumbnail.",
+      "ocio_config": "${OCIO}",
+      "thumbnail_frame": "largest",
+      "output_colorspace": "Output - Rec.709",
+      "color_args": [
+        "--colorconvert",
+        "{input_colorspace}",
+        "{output_colorspace}"
+      ]
+    },
+    "ACES to Rec.709 \u2014 middle frame": {
+      "ocio_config": "${OCIO}",
+      "thumbnail_frame": "middle",
+      "output_colorspace": "Output - Rec.709",
+      "color_args": [
+        "--colorconvert",
+        "{input_colorspace}",
+        "{output_colorspace}"
+      ]
+    },
+    "VFX Transcode \u2014 Rec.709": {
+      "proxy_backend": "vfx_transcode",
+      "ocio_config": "${OCIO}",
+      "thumbnail_frame": "largest",
+      "output_colorspace": "Output - Rec.709",
+      "color_args": [
+        "--colorconvert",
+        "{input_colorspace}",
+        "{output_colorspace}"
+      ]
+    }
+  },
+  "deadline": {
+    "command": "deadlinecommand",
+    "python_version": "3.10",
+    "pool": "none",
+    "group": "none",
+    "priority": 50,
+    "worker_script": "",
+    "spool_root": ""
+  }
+}
