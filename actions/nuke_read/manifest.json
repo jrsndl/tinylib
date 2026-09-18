@@ -1,0 +1,5 @@
+{
+  "id": "nuke.read", "name": "Import main into Nuke", "version": "1.0.0",
+  "category": "Nuke", "entrypoint": "action.py", "config": "config.json",
+  "hosts": ["nuke"], "asset_filter": {"requires": ["main"], "min_selection": 1}
+}

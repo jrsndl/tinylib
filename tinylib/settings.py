@@ -27,5 +27,15 @@ def load_settings(path=None):
     for key, value in data.get('tools', {}).items():
         if value.startswith(('./', '../')):
             data['tools'][key] = str((path.parent / value).resolve())
+    action_roots = data.get('action_roots', [str(Path(__file__).resolve().parent.parent / 'actions')])
+    data['action_roots'] = [str((path.parent / root).resolve()) if not Path(root).is_absolute() else root
+                            for root in action_roots]
+    security = Path(data['security_config']) if data.get('security_config') else path.resolve()
+    if not security.is_absolute():
+        security = path.parent / security
+    security_local = security.with_name(security.stem + '.local' + security.suffix)
+    if security_local.is_file():
+        security = security_local
+    data['_security_path'] = str(security.resolve())
     data['_config_path'] = str(path.resolve())
     return data

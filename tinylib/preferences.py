@@ -6,6 +6,8 @@ import uuid
 from pathlib import Path
 from .library import atomic_json, library_lock, read_json
 
+ASSET_MIME = 'application/x-tinylib-asset-keys'
+
 
 def asset_key(asset):
     # Media identity survives legacy database migration and library display-name changes.
@@ -100,3 +102,36 @@ class Preferences:
             for key in keys:
                 entries.pop(key, None)
         self.change(remove)
+
+    def export_collection(self, identifier, path):
+        collection = self.collection(identifier)
+        atomic_json(path, {'format': 'tinylib.collection', 'version': 1, 'name': collection['name'],
+                           'assets': list(collection['assets'].values())})
+
+    def import_collection(self, path):
+        if Path(path).stat().st_size > 16 * 1024 * 1024:
+            raise ValueError('Collection JSON exceeds 16 MB.')
+        data = read_json(path)
+        if (data.get('format') != 'tinylib.collection' or data.get('version') != 1
+                or not isinstance(data.get('name'), str) or not data['name'].strip()
+                or not isinstance(data.get('assets'), list)):
+            raise ValueError('Not a TinyLib collection JSON file.')
+        refs = {}
+        for item in data['assets']:
+            if not isinstance(item, dict) or any(not isinstance(item.get(key), str) or not item[key] for key in ('name', 'main', 'library_root')):
+                raise ValueError('Collection contains an invalid asset reference.')
+            clean = reference(item)
+            if any(not isinstance(value, str) for value in clean.values()):
+                raise ValueError('Asset reference fields must be text.')
+            refs[asset_key(clean)] = clean
+        def create(current):
+            name = data['name'].strip()
+            existing = {c['name'].casefold() for c in current['collections']}
+            candidate, suffix = name, 2
+            while candidate.casefold() in existing:
+                candidate = '%s (%d)' % (name, suffix)
+                suffix += 1
+            identifier = uuid.uuid4().hex
+            current['collections'].append({'id': identifier, 'name': candidate, 'assets': refs})
+            return identifier
+        return self.change(create)

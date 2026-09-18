@@ -25,5 +25,9 @@
     "oiiotool": "../executables/oiio2/oiiotool.exe"
   },
   "profiles": {},
-  "deadline": {}
+  "deadline": {},
+  "action_roots": [
+    "../actions"
+  ],
+  "security_config": "studio.json"
 }

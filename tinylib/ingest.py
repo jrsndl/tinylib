@@ -5,10 +5,14 @@ import subprocess
 import uuid
 from pathlib import Path
 from .library import atomic_json, safe_component, sequence_files, split_sequence
+from .access import AccessControl
 
 
 def make_manifest(settings, library, name, category, source, tags, colorspace,
                   profile, media, fps=24.0, highres='', preview_source='main', kind='auto'):
+    access = settings.get('_access') or AccessControl(settings)
+    access.refresh()
+    access.require(library['root'], 'ingest')
     if library.get('read_only'):
         raise ValueError('This library is configured read-only.')
     name, category = safe_component(name), safe_component(category)
@@ -68,6 +72,9 @@ def save_manifest(manifest, folder):
 
 
 def submit_deadline(manifest, settings):
+    access = settings.get('_access') or AccessControl(settings)
+    access.refresh()
+    access.require(manifest['library']['root'], 'ingest')
     config = settings.get('deadline', {})
     script = config.get('worker_script', '')
     spool = config.get('spool_root', '')

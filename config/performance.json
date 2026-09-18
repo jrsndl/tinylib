@@ -60,5 +60,9 @@
     "priority": 50,
     "worker_script": "",
     "spool_root": ""
-  }
+  },
+  "action_roots": [
+    "../actions"
+  ],
+  "security_config": "studio.json"
 }

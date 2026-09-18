@@ -9,13 +9,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 from tinylib.qt import QtCore, QtGui, QtWidgets
 from tinylib.ui import Browser
+from helpers import test_access
 
 app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 QtGui.QFontDatabase.addApplicationFont('C:/Windows/Fonts/segoeui.ttf')
 root = Path(__file__).resolve().parents[1]
 temp = tempfile.TemporaryDirectory()
 start = time.perf_counter()
-window = Browser(root / 'config/performance.json', Path(temp.name) / 'preferences.json')
+window = Browser(root / 'config/performance.json', Path(temp.name) / 'preferences.json', access=test_access(root / 'config/performance.json'))
 window.show()
 while window.loader.isRunning():
     app.processEvents()

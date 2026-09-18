@@ -1,0 +1,5 @@
+{
+  "id": "nuke.highres", "name": "Import highres into Nuke", "version": "1.0.0",
+  "category": "Nuke", "entrypoint": "action.py", "config": "config.json",
+  "hosts": ["nuke"], "asset_filter": {"requires": ["highres"], "min_selection": 1}
+}

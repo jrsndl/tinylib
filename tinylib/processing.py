@@ -149,11 +149,17 @@ def validate_media(outputs, manifest):
                 raise ValueError('Proxy frame rate differs from ingest FPS.')
 
 
-def process(manifest_path):
+def process(manifest_path, access=None):
     job = read_json(manifest_path)
     if job.get('manifest_version') != 1:
         raise ValueError('Unsupported manifest version.')
     root = Path(job['library']['root'])
+    if access is None:
+        from .access import AccessControl
+        from .settings import load_settings
+        access = AccessControl(load_settings())
+    access.refresh()
+    access.require(root, 'ingest')
     if job['library'].get('read_only'):
         raise ValueError('Library is read-only.')
     name = safe_component(job['name'])

@@ -6,7 +6,12 @@ from .settings import load_settings
 from .preferences import Preferences, asset_key
 from .filters import accepts
 from .collection_ui import CollectionsPanel
-from .views import STYLE, Loader, ImageCache, AssetModel, Grid, DetailsView, PreviewDialog
+from .views import STYLE, Loader, ImageCache, AssetModel, Grid, DetailsView
+from .access import AccessControl
+from .access_ui import AccessDialog
+from .actions import ActionRegistry
+from .action_ui import ActionPicker
+from .player import Player
 
 
 class StarButton(QtWidgets.QPushButton):
@@ -67,9 +72,14 @@ class NumericFilter(QtWidgets.QWidget):
 
 
 class Browser(QtWidgets.QWidget):
-    def __init__(self, config_path=None, preferences_path=None):
+    def __init__(self, config_path=None, preferences_path=None, access=None):
         super().__init__()
         self.settings = load_settings(config_path)
+        self.access = access or AccessControl(self.settings)
+        self.settings['_access'] = self.access
+        self.registry = ActionRegistry(self.settings['action_roots'])
+        self.player = Player(self.settings, self)
+        self.player.error.connect(self.show_error)
         self.preferences = Preferences(preferences_path)
         self.assets, self.errors = [], []
         self.selection_source = 'main'
@@ -84,16 +94,23 @@ class Browser(QtWidgets.QWidget):
         heading.setObjectName('heading')
         top.addWidget(heading)
         top.addStretch()
+        self.identity_label = QtWidgets.QLabel(self.access.identity)
+        top.addWidget(self.identity_label)
+        self.access_button = QtWidgets.QPushButton('Access rights…')
+        self.access_button.clicked.connect(self.manage_access)
+        self.access_button.setVisible(self.access.is_admin)
+        top.addWidget(self.access_button)
         config_button = QtWidgets.QPushButton('Configuration…')
         config_button.clicked.connect(self.configuration)
+        config_button.setEnabled(self.access.is_admin)
         top.addWidget(config_button)
         self.refresh = QtWidgets.QPushButton('Refresh')
         self.refresh.clicked.connect(self.reload)
         top.addWidget(self.refresh)
-        ingest = QtWidgets.QPushButton('+ Ingest asset')
-        ingest.setObjectName('primary')
-        ingest.clicked.connect(self.ingest)
-        top.addWidget(ingest)
+        self.ingest_button = QtWidgets.QPushButton('+ Ingest asset')
+        self.ingest_button.setObjectName('primary')
+        self.ingest_button.clicked.connect(self.ingest)
+        top.addWidget(self.ingest_button)
         layout.addLayout(top)
         self.make_filters(layout)
         self.splitter = QtWidgets.QSplitter()
@@ -120,12 +137,13 @@ class Browser(QtWidgets.QWidget):
         self.stack.addWidget(self.table)
         main_layout.addWidget(self.stack, 1)
         self.splitter.addWidget(main)
-        self.collections = CollectionsPanel(self.preferences)
+        self.collections = CollectionsPanel(self.preferences, self.cache, self.access)
         self.collections.hide()
         self.collections.changed.connect(self.collections_changed)
         self.collections.selected.connect(self.collection_selection)
         self.collections.preview_requested.connect(self.preview)
         self.collections.error.connect(self.show_error)
+        self.collections.actions.requested.connect(lambda identifier: self.run_action(identifier, collection=True))
         self.splitter.addWidget(self.collections)
         self.make_properties()
         self.splitter.setSizes([190, 1000, 0, 300])
@@ -147,7 +165,7 @@ class Browser(QtWidgets.QWidget):
         self.grid.selectionModel().selectionChanged.connect(self.main_selection)
         self.grid.selectionModel().currentChanged.connect(self.main_selection)
         for widget in (self.grid, self.grid.viewport(), self.table, self.table.viewport(),
-                       self.collections.items, self.collections.items.viewport()):
+                       self.collections.grid, self.collections.grid.viewport(), self.collections.table, self.collections.table.viewport()):
             widget.installEventFilter(self)
         self.grid.doubleClicked.connect(self.preview)
         self.table.doubleClicked.connect(self.preview)
@@ -256,14 +274,11 @@ class Browser(QtWidgets.QWidget):
         details.addWidget(self.detail_text, 1)
         self.preview_button = QtWidgets.QPushButton('Open preview')
         self.preview_button.clicked.connect(self.preview)
-        self.import_button = QtWidgets.QPushButton('Import main into Nuke')
-        self.import_button.setObjectName('primary')
-        self.import_button.clicked.connect(lambda: self.import_selected(False))
-        self.highres_button = QtWidgets.QPushButton('Import highres into Nuke')
-        self.highres_button.clicked.connect(lambda: self.import_selected(True))
-        for button in (self.preview_button, self.import_button, self.highres_button):
-            button.setEnabled(False)
-            details.addWidget(button)
+        self.preview_button.setEnabled(False)
+        details.addWidget(self.preview_button)
+        self.action_picker = ActionPicker()
+        self.action_picker.requested.connect(self.run_action)
+        details.addWidget(self.action_picker)
         self.splitter.addWidget(panel)
 
     def pick_tag(self, index):
@@ -289,13 +304,29 @@ class Browser(QtWidgets.QWidget):
             return
         self.refresh.setEnabled(False)
         self.status.setText('Loading libraries…')
-        self.loader = Loader(self.settings['libraries'], self)
+        try:
+            self.access.refresh()
+            configs = [library for library in self.settings['libraries'] if self.access.can(library['root'], 'view')]
+        except Exception as error:
+            configs = []
+            self.status.setText('Cannot read studio permissions: ' + str(error))
+        self.player.stop()
+        self.registry.reload()
+        self.ingest_button.setEnabled(any(not library.get('read_only') and self.access.can(library['root'], 'ingest') for library in configs))
+        self.access_button.setVisible(self.access.is_admin)
+        self.loader = Loader(configs, self)
         self.loader.loaded.connect(self.loaded)
         self.loader.finished.connect(lambda: self.refresh.setEnabled(True))
         self.loader.start()
 
     def loaded(self, assets, errors):
-        self.assets, self.errors = assets, errors
+        try:
+            self.access.refresh()
+            assets = [asset for asset in assets if self.access.can(asset['library_root'], 'view')]
+        except Exception as error:
+            assets = []
+            errors = errors + ['Cannot read studio permissions: ' + str(error)]
+        self.assets, self.errors = assets, errors + self.registry.errors
         for asset in assets:
             asset['_rating'] = self.preferences.rating(asset)
         current = self.categories.currentItem()
@@ -307,6 +338,8 @@ class Browser(QtWidgets.QWidget):
         self.categories.addTopLevelItem(all_item)
         target = all_item
         for config in self.settings['libraries']:
+            if not self.access.can(config['root'], 'view'):
+                continue
             root = str(Path(config['root']))
             parent = QtWidgets.QTreeWidgetItem([config['name']])
             parent.setData(0, QtCore.Qt.UserRole, (root, ''))
@@ -385,7 +418,7 @@ class Browser(QtWidgets.QWidget):
         if event.type() in (QtCore.QEvent.FocusIn, QtCore.QEvent.MouseButtonPress):
             if watched in (self.grid, self.grid.viewport(), self.table, self.table.viewport()):
                 self.selection_source = 'main'
-            elif watched in (self.collections.items, self.collections.items.viewport()):
+            elif watched in (self.collections.grid, self.collections.grid.viewport(), self.collections.table, self.collections.table.viewport()):
                 self.selection_source = 'collection'
             QtCore.QTimer.singleShot(0, self.selection)
         return super().eventFilter(watched, event)
@@ -397,8 +430,9 @@ class Browser(QtWidgets.QWidget):
     def selection(self, *_):
         assets = self.selected_assets()
         asset = assets[0] if assets else None
-        for button in (self.preview_button, self.import_button, self.highres_button, self.clear_stars, *self.star_buttons):
+        for button in (self.preview_button, self.clear_stars, *self.star_buttons):
             button.setEnabled(bool(asset))
+        self.update_actions()
         ratings = {a.get('_rating', 0) for a in assets}
         rating = next(iter(ratings)) if len(ratings) == 1 else 0
         for value, button in enumerate(self.star_buttons, 1):
@@ -410,7 +444,6 @@ class Browser(QtWidgets.QWidget):
             self.detail_image.setText('Select assets')
             return
         self.preview_button.setEnabled(len(assets) == 1)
-        self.highres_button.setEnabled(all(a.get('highres') for a in assets))
         self.detail_title.setText(asset['name'].replace('_', ' ') if len(assets) == 1 else '%d assets selected' % len(assets))
         self.detail_title.setToolTip(asset['name'])
         if len(assets) > 1:
@@ -452,15 +485,8 @@ class Browser(QtWidgets.QWidget):
     def change_view(self, mode):
         self.grid.cards.hover_row = -1
         self.stack.setCurrentWidget(self.table if mode == 'Details' else self.grid)
-        if mode == 'List':
-            self.grid.setViewMode(QtWidgets.QListView.ListMode)
-            self.grid.setWrapping(False)
-            self.grid.setItemDelegate(QtWidgets.QStyledItemDelegate(self.grid))
-        elif mode == 'Tiles':
-            self.grid.setViewMode(QtWidgets.QListView.IconMode)
-            self.grid.setWrapping(True)
-            self.grid.setItemDelegate(self.grid.cards)
-        self.grid.setMovement(QtWidgets.QListView.Static)
+        if mode != 'Details':
+            self.grid.configure_mode(mode)
         self.scale.setEnabled(mode == 'Tiles')
         self.grid.doItemsLayout()
 
@@ -498,30 +524,53 @@ class Browser(QtWidgets.QWidget):
         assets = self.selected_assets()
         if len(assets) == 1:
             try:
-                dialog = PreviewDialog(assets[0], self)
-                dialog.exec_() if hasattr(dialog, 'exec_') else dialog.exec()
+                self.access.refresh()
+                self.access.require(assets[0]['library_root'], 'view')
+                self.player.play(assets[0])
             except Exception as error:
                 self.show_error(str(error))
 
-    def import_selected(self, highres):
-        assets = self.selected_assets()
-        if assets:
-            try:
-                from .nuke_bridge import import_asset
-                for asset in assets:
-                    import_asset(asset, highres)
-            except ImportError:
-                QtWidgets.QMessageBox.information(self, 'Nuke', 'Open this browser inside Nuke to import assets.')
-            except Exception as error:
-                self.show_error(str(error))
+    def update_actions(self):
+        assets = self.main_selected()
+        self.action_picker.populate([action for action in self.registry.actions.values()
+                                     if self.registry.allowed(action, assets, self.access)])
+        collection_assets = self.collections.action_assets()
+        self.collections.actions.populate([action for action in self.registry.actions.values()
+                                          if self.registry.allowed(action, collection_assets, self.access)])
+
+    def run_action(self, identifier, collection=False):
+        assets = self.collections.action_assets() if collection else self.main_selected()
+        try:
+            result = self.registry.run(identifier, assets, self.access,
+                                       {'parent': self, 'settings': self.settings,
+                                        'collection': self.collections.combo.currentText() if collection else None})
+            self.status.setText(str(result) if isinstance(result, str) else 'Action completed.')
+        except Exception as error:
+            self.show_error(str(error))
+
+    def manage_access(self):
+        try:
+            dialog = AccessDialog(self.access, self.registry, self)
+            accepted = dialog.exec_() if hasattr(dialog, 'exec_') else dialog.exec()
+            if accepted:
+                self.player.stop()
+                self.reload()
+        except Exception as error:
+            self.show_error(str(error))
 
     def ingest(self):
-        from .ingest_ui import IngestDialog
-        dialog = IngestDialog(self.settings, self.assets, self)
-        dialog.exec_() if hasattr(dialog, 'exec_') else dialog.exec()
+        try:
+            self.access.refresh()
+            from .ingest_ui import IngestDialog
+            dialog = IngestDialog(self.settings, self.assets, self)
+            dialog.exec_() if hasattr(dialog, 'exec_') else dialog.exec()
+        except Exception as error:
+            self.show_error(str(error))
 
     def configuration(self):
-        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(self.settings['_config_path']))
+        self.access.refresh()
+        if self.access.is_admin:
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(self.settings['_config_path']))
 
     def show_error(self, message):
         QtWidgets.QMessageBox.warning(self, 'TinyLib', message)
@@ -537,4 +586,5 @@ class Browser(QtWidgets.QWidget):
             self.status.setText('Waiting for preview reads; close again in a moment.')
             event.ignore()
             return
+        self.player.stop()
         super().closeEvent(event)

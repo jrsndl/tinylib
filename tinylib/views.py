@@ -5,7 +5,7 @@ from .qt import QtCore, QtGui, QtWidgets
 from .library import Library
 from .preferences import asset_key
 from .filters import duration
-from .collection_ui import ASSET_MIME
+from .preferences import ASSET_MIME
 from pathlib import Path
 
 STYLE = '''
@@ -276,6 +276,22 @@ class Grid(QtWidgets.QListView):
         self.setItemDelegate(self.cards)
         cache.changed.connect(self.viewport().update)
 
+    def configure_mode(self, mode):
+        if mode == 'List':
+            self.setViewMode(QtWidgets.QListView.ListMode)
+            self.setFlow(QtWidgets.QListView.LeftToRight)
+            self.setWrapping(True)
+            self.setItemDelegate(QtWidgets.QStyledItemDelegate(self))
+            self.setGridSize(QtCore.QSize(240, 30))
+        else:
+            self.setViewMode(QtWidgets.QListView.IconMode)
+            self.setFlow(QtWidgets.QListView.LeftToRight)
+            self.setWrapping(True)
+            self.setItemDelegate(self.cards)
+            self.setGridSize(QtCore.QSize())
+        self.setMovement(QtWidgets.QListView.Static)
+        self.doItemsLayout()
+
     def mouseMoveEvent(self, event):
         index = self.indexAt(event.pos())
         row = index.row() if index.isValid() else -1
@@ -288,61 +304,3 @@ class Grid(QtWidgets.QListView):
         self.cards.hover_row = -1
         self.viewport().update()
         super().leaveEvent(event)
-
-class PreviewDialog(QtWidgets.QDialog):
-    def __init__(self, asset, parent):
-        super().__init__(parent)
-        self.setWindowTitle(asset['name'])
-        self.resize(1000, 650)
-        layout = QtWidgets.QVBoxLayout(self)
-        path = asset.get('proxy') or asset.get('thumb')
-        if asset.get('kind') != 'footage':
-            label = QtWidgets.QLabel()
-            label.setAlignment(QtCore.Qt.AlignCenter)
-            pixmap = QtGui.QPixmap(path)
-            if pixmap.isNull():
-                raise ValueError('Preview unavailable: ' + path)
-            label.setPixmap(pixmap.scaled(960, 540, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
-            layout.addWidget(label)
-            return
-        if not path or not Path(path).is_file():
-            raise ValueError('Playback proxy unavailable: ' + str(path))
-        binding = QtCore.__name__.split('.')[0]
-        if binding == 'PySide6':
-            from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
-            from PySide6.QtMultimediaWidgets import QVideoWidget
-            self.player = QMediaPlayer(self)
-            self.audio = QAudioOutput(self)
-            self.audio.setMuted(True)
-            self.player.setAudioOutput(self.audio)
-            self.player.setSource(QtCore.QUrl.fromLocalFile(path))
-        else:
-            from PySide2.QtMultimedia import QMediaPlayer, QMediaContent
-            from PySide2.QtMultimediaWidgets import QVideoWidget
-            self.player = QMediaPlayer(self)
-            self.player.setMuted(True)
-            self.player.setMedia(QMediaContent(QtCore.QUrl.fromLocalFile(path)))
-        video = QVideoWidget()
-        self.player.setVideoOutput(video)
-        layout.addWidget(video, 1)
-        slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.player.durationChanged.connect(lambda duration: slider.setRange(0, duration))
-        self.player.positionChanged.connect(slider.setValue)
-        slider.sliderMoved.connect(self.player.setPosition)
-        layout.addWidget(slider)
-        controls = QtWidgets.QHBoxLayout()
-        for label, fn in [('Play', self.player.play), ('Pause', self.player.pause), ('Restart', lambda: self.player.setPosition(0))]:
-            button = QtWidgets.QPushButton(label)
-            button.clicked.connect(fn)
-            controls.addWidget(button)
-        layout.addLayout(controls)
-        self.error_label = QtWidgets.QLabel()
-        layout.addWidget(self.error_label)
-        signal = self.player.errorOccurred if hasattr(self.player, 'errorOccurred') else self.player.error
-        signal.connect(lambda *_: self.error_label.setText(self.player.errorString()))
-        self.player.play()
-
-    def done(self, result):
-        if hasattr(self, 'player'):
-            self.player.stop()
-        super().done(result)

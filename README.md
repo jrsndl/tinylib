@@ -1,6 +1,6 @@
 # TinyLib
 
-A Nuke asset browser and Deadline ingest worker for studio footage and HDRI libraries.
+A studio footage and HDRI browser with DCC action plugins and a Deadline ingest worker.
 
 ## Try the sample libraries
 
@@ -42,6 +42,29 @@ tinylib.show("C:/tools/tinylib/config/demo.json")
 
 The browser uses PySide2 for Nuke 15 and PySide6 for Nuke 16+. Main and highres imports create Read nodes with explicit frame ranges and color space; an unknown project color space is reported instead of silently selecting a different one. Still previews preserve image aspect ratio. Double-click an asset for JPEG/MP4/MOV preview playback; hover footage for a 24-frame filmstrip.
 
+Previews autoplay in the TinyLib player using FFmpeg decoding. The frame overlay shows the displayed source frame, starting at the asset's first frame. The player supports the library's constant-frame-rate footage proxies and still images.
+
+| Control | Behavior |
+| --- | --- |
+| **J / L** | Play backward / forward. Repeated presses in the same direction increase speed through 1×, 2×, 4×, 8× and 16×. Changing direction starts at 1×. |
+| **K** | Stop at the current position and reset speed to 1×. |
+| **Space** | Stop, or start forward playback at 1×. |
+| **Left / Right** | Stop and step one frame backward / forward. |
+| **O** | Toggle the frame-number overlay. |
+| **Hover near the bottom** | Reveal the timeline and current time; click or drag its indicator to scrub. Scrubbing stops playback. |
+| **Loop** | Enabled by default for each player window. Wraps in both directions; when disabled, playback stops at either end and resets speed. |
+| **Esc / Q** | Close the player. |
+
+Decoding runs asynchronously with a bounded frame cache, including backward playback. Preview decoding fits within 960×540 while preserving aspect ratio; no library files are changed. Playback is silent. Slower decoding/storage can reduce achieved playback speed while buffering.
+
+The previous external player remains available with `"player_backend": "ffplay"` in studio configuration. Set `tools.ffplay` or place ffplay beside the configured ffmpeg executable; otherwise PATH is used. This fallback uses stock ffplay shortcuts and does not provide the TinyLib transport/timeline controls above.
+
+## Windows identity and studio actions
+
+TinyLib uses the current Windows login without a password prompt. The first user receives all four default groups. Admin and user group assignments, plus per-library visibility, ingest and action grants, are stored in the studio configuration. Admins edit these through **Access rights…**. Unknown users have no access until assigned.
+
+Studio-wide Python actions are discovered from `action_roots`. Each action has a manifest, configuration JSON, Python entrypoint, and optional PNG icon. The bottom properties dropdown runs an action on the main selection; the collection dropdown runs it on the entire collection. Bundled actions import main/highres into Nuke and copy paths. See [actions and access setup](docs/actions-and-access.md) for the configuration schema, plugin contract and farm-account setup.
+
 ## Search and libraries
 
 Each configured library has a name, root folder and optional `legacy_roots` mappings. Add more entries to the `libraries` array in `config/studio.json`. `read_only: true` excludes a library from ingest destinations. Refresh rereads library data; restart the browser after changing configuration.
@@ -54,13 +77,14 @@ The filtering panel combines fulltext search, an **Invert** checkbox (applies on
 
 ## Main-view controls and collections
 
-- **Tiles** is the default, with thumbnails and hover filmstrips. **Details** presents rows with a tiny preview and columns for name, library, category, media type, duration, dimensions, stars and keywords. **List** shows asset names. Selection is preserved when switching views.
+- **Tiles** is the default, with thumbnails and hover filmstrips. **Details** presents rows with a tiny preview and columns for name, library, category, media type, duration, dimensions, stars and keywords. **List** shows asset names in multiple columns when space permits. Selection is preserved when switching views.
 - Use Ctrl-click, Shift-click or Ctrl+A for multi-selection. Import main/highres and star-rating actions apply to the selected assets. The properties panel summarizes multi-selection; opening a preview requires one selected asset.
 - **Play all / Stop all** animates the available filmstrips together in tiles and details. Only visible previews are decoded and painted; newly scrolled-in assets join the shared animation position. List mode remains text-only. Stopping restores thumbnails; ordinary hover previews remain available.
 - The five stars set the rating on the entire selection. **Clear** sets zero stars. Mixed ratings show five unfilled stars until a value is chosen. Card size is in this top control panel and applies to tiles.
 - **Collections** opens the scratchpad between the main view and properties. It starts hidden every time. Create collections with **New** (collection01, collection02, …), rename them, or delete them. Deleting a collection does not delete any media.
 - Drag a main-view selection onto the collection list. If there are no collections, the first one is created automatically. Duplicate picks in one collection are ignored. Picked assets disappear from the main view, including when the collections panel is closed. Remove a pick or delete its collection to restore it; an asset remains hidden if another collection still contains it.
-- Collections are independent of the current search or category. Select items there to preview/import/rate them. Unavailable assets remain listed with an unavailable label so references are not silently lost.
+- Collections are independent of the current search or category, with their own **Tiles / Details / List** selector and **Play all** toggle. Tiles is the default. Select items there to preview/rate them; the action dropdown applies to the whole collection. Unavailable assets remain listed with an unavailable label so references are not silently lost.
+- **Export / Import**, beside the collection management buttons, exchange simple JSON files. Both file browsers start in Downloads. Imports create a new collection, adding a numeric suffix for duplicate names. Files contain references, not media; assets resolve through configured, permitted libraries with matching roots and main paths.
 
 Stars and collection references are saved per user at `%APPDATA%/TinyLib/preferences.json` on Windows (`~/.config/TinyLib/preferences.json` without APPDATA). Override the path with `TINYLIB_USER_PREFS` if needed. Saves are atomic and reread existing preferences under a lock to preserve edits from other browser windows. Library databases, including the read-only performance library, are not modified by ratings or collections. Asset identity uses the library root and main path, so renaming a library label or migrating database IDs retains picks; relocating a root requires remapping preferences.
 
@@ -111,12 +135,15 @@ Workers stage files in `<library>/.tinylib-staging/<job-id>`. An exclusive libra
 python -m unittest discover -s tests -v
 python tests/qt_smoke.py
 python tests/qt_features.py
+python tests/qt_access.py
 python tests/qt_performance.py
+python tests/player_smoke.py
+python tests/qt_player.py
 python tests/processing_smoke.py
 python tests/vfx_smoke.py
 ```
 
-The real conversion tests use only sample inputs and write into unique folders under `artifacts`; they do not submit farm jobs. Screenshots are also saved there. Both PySide2 and Nuke 16's PySide6 runtime were checked, along with 15 core/filter/preference tests and real OIIO/FFmpeg and VFX Transcode conversions. The feature test exercises Ctrl-click selection, view switching, filters, star clicks, Qt drag/drop, collection CRUD and browser-restart persistence with temporary user preferences. The performance test reads the configured library and also uses temporary preferences. Live Nuke Read-node imports and a real Deadline job still require studio validation.
+The real conversion tests use only sample inputs and write into unique folders under `artifacts`; they do not submit farm jobs. Screenshots are also saved there. Tests cover permissions and denied plugin imports, collection JSON exchange, real ffplay autoplay and frame overlays, filters and preferences. The feature test exercises Ctrl-click selection, multicolumn lists, view switching, filters, star clicks, Qt drag/drop, collection actions and browser-restart persistence under PySide2 and PySide6 with temporary user preferences. The performance test reads the configured library and also uses temporary preferences. Live Nuke Read-node imports and a real Deadline job still require studio validation.
 
 For standalone tests with Nuke 16's Python, set `PYTHONPATH` to its `pythonextensions/site-packages`, `QT_PLUGIN_PATH` to its `qtplugins` directory and `QT_QPA_PLATFORM_PLUGIN_PATH` to `qtplugins/platforms`. The smoke test sets `QT_QPA_PLATFORM=offscreen`. These overrides are for standalone testing only, not Nuke startup.
 

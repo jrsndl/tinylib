@@ -7,6 +7,7 @@ from tinylib.library import Library, atomic_json, matches, sequence_files, detec
 from tinylib.ingest import make_manifest, submit_deadline
 from tinylib.processing import sample_indices, process
 from tinylib.settings import load_settings
+from tinylib.access import AccessControl
 
 
 class LibraryTests(unittest.TestCase):
@@ -102,7 +103,7 @@ class LibraryTests(unittest.TestCase):
         atomic_json(path, job)
         with patch('tinylib.processing.Processor.generate', side_effect=RuntimeError('failed')):
             with self.assertRaises(RuntimeError):
-                process(path)
+                process(path, access=AccessControl({'_config_path': str(self.root / 'studio.json')}, identity='test', persist=False))
         self.assertFalse((self.root / 'still/Asset').exists())
         self.assertFalse((self.root / 'data.json').exists())
         self.assertEqual(json.loads(path.with_suffix('.status.json').read_text())['state'], 'failed')
@@ -110,8 +111,9 @@ class LibraryTests(unittest.TestCase):
     def test_deadline_job_and_safe_arguments(self):
         worker = self.root / 'worker script.py'
         worker.touch()
-        job = dict(job_id='jobid', name='Nice asset')
+        job = dict(job_id='jobid', name='Nice asset', library={'root': str(self.root)})
         settings = {'deadline': {'worker_script': str(worker), 'spool_root': str(self.root)}}
+        settings['_access'] = AccessControl({'_config_path': str(self.root / 'studio.json')}, identity='test', persist=False)
         with patch('tinylib.ingest.subprocess.run') as run:
             run.return_value.returncode = 0
             run.return_value.stdout = 'Result=Success\nJobID=123abc\n'

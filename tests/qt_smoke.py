@@ -7,6 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 from tinylib.qt import QtCore, QtGui, QtWidgets
 from tinylib.ui import Browser
+from helpers import test_access
 from tinylib.ingest_ui import IngestDialog
 
 app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
@@ -14,7 +15,7 @@ QtGui.QFontDatabase.addApplicationFont('C:/Windows/Fonts/segoeui.ttf')
 app.setFont(QtGui.QFont('Segoe UI', 10))
 root = Path(__file__).resolve().parents[1]
 preferences_temp = tempfile.TemporaryDirectory()
-window = Browser(root / 'config/demo.json', Path(preferences_temp.name) / 'preferences.json')
+window = Browser(root / 'config/demo.json', Path(preferences_temp.name) / 'preferences.json', access=test_access(root / 'config/demo.json'))
 window.show()
 limit = QtCore.QElapsedTimer()
 limit.start()

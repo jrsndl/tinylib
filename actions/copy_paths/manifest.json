@@ -1,0 +1,5 @@
+{
+  "id": "clipboard.paths", "name": "Copy main paths", "version": "1.0.0",
+  "category": "General", "entrypoint": "action.py", "config": "config.json",
+  "asset_filter": {"requires": ["main"], "min_selection": 1}
+}
