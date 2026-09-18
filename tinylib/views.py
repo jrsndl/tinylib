@@ -1,11 +1,13 @@
 """Nuke-toned browser with virtualized cards, keyword filtering and hover strips."""
 from collections import OrderedDict
 import json
+import math
 from .qt import QtCore, QtGui, QtWidgets
 from .library import Library
 from .preferences import asset_key
 from .filters import duration
-from .preferences import ASSET_MIME
+from .preferences import ASSET_MIME, COLLECTION_MIME
+from .tile_text import DEFAULT_TEMPLATE, render_template, validate_template
 from pathlib import Path
 
 STYLE = '''
@@ -109,6 +111,7 @@ class AssetModel(QtCore.QAbstractTableModel):
     def __init__(self, parent):
         super().__init__(parent)
         self.assets = []
+        self.collection_origin = None
 
     def rowCount(self, parent=QtCore.QModelIndex()):
         return 0 if parent.isValid() else len(self.assets)
@@ -147,12 +150,15 @@ class AssetModel(QtCore.QAbstractTableModel):
         return flags | QtCore.Qt.ItemIsDragEnabled if index.isValid() else flags
 
     def mimeTypes(self):
-        return [ASSET_MIME]
+        return [ASSET_MIME, COLLECTION_MIME]
 
     def mimeData(self, indexes):
         data = QtCore.QMimeData()
         rows = sorted({index.row() for index in indexes if index.isValid()})
         data.setData(ASSET_MIME, json.dumps([asset_key(self.assets[row]) for row in rows]).encode('utf-8'))
+        if self.collection_origin:
+            origin = dict(self.collection_origin, keys=[self.assets[row].get('_collection_key') or asset_key(self.assets[row]) for row in rows])
+            data.setData(COLLECTION_MIME, json.dumps(origin).encode('utf-8'))
         return data
 
     def supportedDragActions(self):
@@ -167,6 +173,8 @@ class Cards(QtWidgets.QStyledItemDelegate):
         self.hover_row = -1
         self.frame = 0
         self.play_all = False
+        self.info = True
+        self.template = DEFAULT_TEMPLATE
 
     def pixmap(self, asset, row):
         if (self.play_all or row == self.hover_row) and asset.get('kind') == 'footage':
@@ -177,7 +185,9 @@ class Cards(QtWidgets.QStyledItemDelegate):
         return self.cache.get(asset.get('thumb', ''))
 
     def sizeHint(self, option, index):
-        return QtCore.QSize(self.width, int(self.width * .5625) + 74)
+        lines = len(validate_template(self.template).split('\n')) if self.template else 0
+        caption = lines * 21 + 36 if self.info else 0
+        return QtCore.QSize(self.width, int(self.width * .5625) + caption)
 
     def paint(self, painter, option, index):
         asset = index.data(QtCore.Qt.UserRole)
@@ -188,7 +198,7 @@ class Cards(QtWidgets.QStyledItemDelegate):
         painter.setPen(QtGui.QColor('#bf945f' if selected else '#3b3b3b'))
         painter.setBrush(QtGui.QColor('#39342d' if selected else '#2c2c2c'))
         painter.drawRoundedRect(rect, 5, 5)
-        image_rect = QtCore.QRect(rect.x()+1, rect.y()+1, rect.width()-2, int(self.width*.5625)-8)
+        image_rect = QtCore.QRect(rect.x()+1, rect.y()+1, rect.width()-2, int(self.width*.5625)-12)
         painter.fillRect(image_rect, QtGui.QColor('#181818'))
         pixmap = self.pixmap(asset, index.row())
         if not pixmap.isNull():
@@ -199,17 +209,23 @@ class Cards(QtWidgets.QStyledItemDelegate):
         else:
             painter.setPen(QtGui.QColor('#707070'))
             painter.drawText(image_rect, QtCore.Qt.AlignCenter, 'Preview unavailable')
-        painter.setPen(QtGui.QColor('#ececec'))
-        metrics = painter.fontMetrics()
-        name = metrics.elidedText(asset['name'], QtCore.Qt.ElideRight, rect.width()-20)
-        painter.drawText(rect.x()+10, image_rect.bottom()+23, name)
-        painter.setPen(QtGui.QColor('#a6a6a6'))
-        metadata = asset.get('metadata', {})
-        dimensions = '%s × %s' % (metadata['width'], metadata['height']) if metadata.get('width') else asset['category']
-        subtitle = asset.get('kind', 'still').upper() + '  ·  ' + dimensions
-        if asset.get('_rating'):
-            subtitle += '  ·  %s/5' % asset['_rating']
-        painter.drawText(rect.x()+10, image_rect.bottom()+44, metrics.elidedText(subtitle, QtCore.Qt.ElideRight, rect.width()-20))
+        if self.info:
+            metrics = painter.fontMetrics()
+            lines = render_template(self.template, asset).split('\n') if self.template else []
+            for line, text in enumerate(lines):
+                painter.setPen(QtGui.QColor('#ececec' if line == 0 else '#a6a6a6'))
+                painter.drawText(rect.x()+10, image_rect.bottom()+21*(line+1), metrics.elidedText(text, QtCore.Qt.ElideRight, rect.width()-20))
+            rating = max(0, min(5, int(asset.get('_rating', 0))))
+            painter.setPen(QtGui.QPen(QtGui.QColor('#969696'), 1.2))
+            for star in range(5):
+                painter.setBrush(QtGui.QColor('#a6a6a6') if star < rating else QtCore.Qt.NoBrush)
+                center = QtCore.QPointF(rect.x()+18+star*22, rect.bottom()-14)
+                points = []
+                for point in range(10):
+                    angle = point * math.pi / 5 - math.pi / 2
+                    radius = 8 if point % 2 == 0 else 3.6
+                    points.append(center + QtCore.QPointF(radius*math.cos(angle), radius*math.sin(angle)))
+                painter.drawPolygon(QtGui.QPolygonF(points))
         painter.restore()
 
 
@@ -290,6 +306,9 @@ class Grid(QtWidgets.QListView):
             self.setItemDelegate(self.cards)
             self.setGridSize(QtCore.QSize())
         self.setMovement(QtWidgets.QListView.Static)
+        # Qt's view-mode defaults can reset drop acceptance when switching modes.
+        self.setDragDropMode(QtWidgets.QAbstractItemView.DragDrop)
+        self.setAcceptDrops(True)
         self.doItemsLayout()
 
     def mouseMoveEvent(self, event):

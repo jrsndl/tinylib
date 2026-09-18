@@ -7,6 +7,7 @@ from pathlib import Path
 from .library import atomic_json, library_lock, read_json
 
 ASSET_MIME = 'application/x-tinylib-asset-keys'
+COLLECTION_MIME = 'application/x-tinylib-collection-selection'
 
 
 def asset_key(asset):
@@ -63,6 +64,9 @@ class Preferences:
         if stars not in range(6):
             raise ValueError('Rating must be 0–5 stars.')
         self.change(lambda data: data['ratings'].update({asset_key(a): stars for a in assets}))
+
+    def set_display(self, **values):
+        self.change(lambda data: data.setdefault('display', {}).update(values))
 
     def create_collection(self, name=None):
         def create(data):

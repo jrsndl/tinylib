@@ -1,9 +1,10 @@
 """Studio browser: library tree, filters, multi-selection and collections."""
 from pathlib import Path
 import math
+import json
 from .qt import QtCore, QtGui, QtWidgets
 from .settings import load_settings
-from .preferences import Preferences, asset_key
+from .preferences import Preferences, asset_key, COLLECTION_MIME
 from .filters import accepts
 from .collection_ui import CollectionsPanel
 from .views import STYLE, Loader, ImageCache, AssetModel, Grid, DetailsView
@@ -12,6 +13,9 @@ from .access_ui import AccessDialog
 from .actions import ActionRegistry
 from .action_ui import ActionPicker
 from .player import Player
+from .tile_text import DEFAULT_TEMPLATE, TOKENS, validate_template
+from .properties_ui import PropertiesEditor
+from .asset_edit import writable_library, save_asset
 
 
 class StarButton(QtWidgets.QPushButton):
@@ -124,11 +128,22 @@ class Browser(QtWidgets.QWidget):
         self.make_controls(main_layout)
         self.cache = ImageCache(self)
         self.grid = Grid(self.cache)
+        display = self.preferences.data.get('display', {})
+        template = display.get('tile_template', self.settings.get('tile_template', DEFAULT_TEMPLATE))
+        try:
+            validate_template(template)
+        except ValueError:
+            template = DEFAULT_TEMPLATE
+        self.grid.cards.template = template
+        self.grid.cards.info = self.info_toggle.isChecked()
         self.model = AssetModel(self)
         self.grid.setModel(self.model)
         self.table = DetailsView(self.grid.cards)
         self.table.setModel(self.model)
         self.table.setSelectionModel(self.grid.selectionModel())
+        for view in (self.grid, self.table):
+            view.setAcceptDrops(True)
+            view.setDragDropMode(QtWidgets.QAbstractItemView.DragDrop)
         for column, width in enumerate([230, 90, 140, 110, 85, 95, 75, 75, 95, 240]):
             self.table.setColumnWidth(column, width)
         self.table.horizontalHeader().setSectionsMovable(True)
@@ -229,6 +244,14 @@ class Browser(QtWidgets.QWidget):
         self.collection_toggle.setCheckable(True)
         self.collection_toggle.toggled.connect(self.toggle_collections)
         row.addWidget(self.collection_toggle)
+        self.caption_button = QtWidgets.QPushButton('Tile text…')
+        self.caption_button.clicked.connect(self.configure_tile_text)
+        row.addWidget(self.caption_button)
+        self.info_toggle = QtWidgets.QPushButton('Info')
+        self.info_toggle.setCheckable(True)
+        self.info_toggle.setChecked(self.preferences.data.get('display', {}).get('tile_info', True))
+        self.info_toggle.toggled.connect(self.toggle_tile_info)
+        row.addWidget(self.info_toggle)
         layout.addLayout(row)
         row = QtWidgets.QHBoxLayout()
         row.addWidget(QtWidgets.QLabel('Rate selection'))
@@ -272,6 +295,10 @@ class Browser(QtWidgets.QWidget):
         self.detail_text = QtWidgets.QPlainTextEdit()
         self.detail_text.setReadOnly(True)
         details.addWidget(self.detail_text, 1)
+        self.properties = PropertiesEditor()
+        self.properties.save_requested.connect(self.save_properties)
+        self.properties.hide()
+        details.addWidget(self.properties, 1)
         self.preview_button = QtWidgets.QPushButton('Open preview')
         self.preview_button.clicked.connect(self.preview)
         self.preview_button.setEnabled(False)
@@ -415,6 +442,31 @@ class Browser(QtWidgets.QWidget):
         self.selection()
 
     def eventFilter(self, watched, event):
+        main_views = (self.grid, self.grid.viewport(), self.table, self.table.viewport())
+        collection_views = (self.collections.grid, self.collections.grid.viewport(), self.collections.table, self.collections.table.viewport())
+        if watched in main_views and event.type() in (QtCore.QEvent.DragEnter, QtCore.QEvent.DragMove, QtCore.QEvent.Drop):
+            try:
+                payload = json.loads(bytes(event.mimeData().data(COLLECTION_MIME)))
+                if payload['preferences'] != str(self.preferences.path.resolve()) or not isinstance(payload['keys'], list) or not all(isinstance(key, str) for key in payload['keys']):
+                    raise ValueError('Invalid collection drag')
+                self.preferences.collection(payload['collection'])
+                if event.type() == QtCore.QEvent.Drop:
+                    self.collections.remove_keys(payload['collection'], payload['keys'])
+                    self.selection_source = 'main'
+                    self.selection()
+                event.setDropAction(QtCore.Qt.CopyAction)
+                event.accept()
+            except (ValueError, KeyError, TypeError, StopIteration):
+                event.ignore()
+            except Exception as error:
+                event.ignore()
+                self.show_error(str(error))
+            return True
+        if watched in main_views + collection_views and event.type() == QtCore.QEvent.KeyPress and event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+            self.selection_source = 'main' if watched in main_views else 'collection'
+            if not event.isAutoRepeat():
+                self.preview()
+            return True
         if event.type() in (QtCore.QEvent.FocusIn, QtCore.QEvent.MouseButtonPress):
             if watched in (self.grid, self.grid.viewport(), self.table, self.table.viewport()):
                 self.selection_source = 'main'
@@ -435,6 +487,16 @@ class Browser(QtWidgets.QWidget):
         self.update_actions()
         ratings = {a.get('_rating', 0) for a in assets}
         rating = next(iter(ratings)) if len(ratings) == 1 else 0
+        self.properties.setVisible(len(assets) == 1)
+        self.detail_text.setVisible(len(assets) != 1)
+        editable = False
+        if len(assets) == 1:
+            try:
+                writable_library(self.settings, self.access, asset)
+                editable = True
+            except PermissionError:
+                pass
+        self.properties.set_asset(asset if len(assets) == 1 else None, editable)
         for value, button in enumerate(self.star_buttons, 1):
             button.set_filled(value <= rating)
         if not asset:
@@ -449,16 +511,49 @@ class Browser(QtWidgets.QWidget):
         if len(assets) > 1:
             self.detail_text.setPlainText('Stars: ' + ('Mixed' if len(ratings) > 1 else str(rating)) +
                                          '\n\n' + '\n'.join(a['name'] for a in assets))
-        else:
-            text = [asset['library'] + '  /  ' + asset['category'],
-                    'Type: ' + asset.get('kind', 'still'), 'Color: ' + asset.get('colorspace', 'ACEScg'),
-                    'Stars: ' + str(rating), '\nKEYWORDS', ', '.join(asset.get('tags', [])), '\nMEDIA']
-            text += ['%s: %s' % (key, value) for key, value in asset.get('metadata', {}).items()]
-            for key in ('main', 'proxy', 'thumb', 'filmstrip', 'highres'):
-                if asset.get(key):
-                    text.extend(['\n' + key.upper(), asset[key]])
-            self.detail_text.setPlainText('\n'.join(text))
         self.update_detail_image()
+
+    def save_properties(self, original, changes, stars):
+        try:
+            updated = save_asset(self.settings, self.access, original, changes)
+        except Exception as error:
+            self.properties.message.setText(str(error))
+            return
+        warning = ''
+        try:
+            if self.preferences.rating(updated) != stars:
+                self.preferences.rate([updated], stars)
+        except Exception as error:
+            warning = 'Metadata saved, but your star rating could not be saved: ' + str(error)
+        for asset in self.assets:
+            if asset_key(asset) == asset_key(original):
+                asset.clear()
+                asset.update(updated)
+        self.properties.cancel_edit()
+        self.loaded(self.assets, [])
+        self.status.setText(warning or 'Asset properties saved.')
+
+    def toggle_tile_info(self, enabled):
+        self.grid.cards.info = enabled
+        self.grid.doItemsLayout()
+        self.grid.viewport().update()
+        try:
+            self.preferences.set_display(tile_info=enabled)
+        except Exception as error:
+            self.show_error(str(error))
+
+    def configure_tile_text(self):
+        text, accepted = QtWidgets.QInputDialog.getMultiLineText(self, 'Tile text',
+            'Tokens: ' + ', '.join('{' + token + '}' for token in TOKENS) + '\nUse \\n or a new line. Up to six lines.', self.grid.cards.template)
+        if accepted:
+            try:
+                validate_template(text)
+                self.preferences.set_display(tile_template=text)
+                self.grid.cards.template = text
+                self.grid.doItemsLayout()
+                self.grid.viewport().update()
+            except Exception as error:
+                self.show_error(str(error))
 
     def update_detail_image(self):
         asset = self.selected()
@@ -488,6 +583,8 @@ class Browser(QtWidgets.QWidget):
         if mode != 'Details':
             self.grid.configure_mode(mode)
         self.scale.setEnabled(mode == 'Tiles')
+        self.info_toggle.setEnabled(mode == 'Tiles')
+        self.caption_button.setEnabled(mode == 'Tiles')
         self.grid.doItemsLayout()
 
     def resize_cards(self, width):

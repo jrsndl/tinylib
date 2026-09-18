@@ -78,17 +78,26 @@ The filtering panel combines fulltext search, an **Invert** checkbox (applies on
 ## Main-view controls and collections
 
 - **Tiles** is the default, with thumbnails and hover filmstrips. **Details** presents rows with a tiny preview and columns for name, library, category, media type, duration, dimensions, stars and keywords. **List** shows asset names in multiple columns when space permits. Selection is preserved when switching views.
+- **Info**, at the far right of the main view's top controls, hides or shows tile captions and the gray star row. With Info off, tiles contain only preview rectangles. **Tile text…** configures captions with tokens and literal `\n` or real new lines (up to six). Supported tokens are `{name}`, `{library}`, `{category}`, `{type}`, `{colorspace}`, `{tags}`, `{width}`, `{height}`, `{fps}`, `{length}` (seconds), `{first}` and `{last}`. Example: `{name}\n{width} × {height}`. Both settings are saved in user preferences; a studio `tile_template` provides the initial template.
+- Press **Enter** with exactly one selected asset to open its player in any view mode. Multiple selections do not open players.
 - Use Ctrl-click, Shift-click or Ctrl+A for multi-selection. Import main/highres and star-rating actions apply to the selected assets. The properties panel summarizes multi-selection; opening a preview requires one selected asset.
 - **Play all / Stop all** animates the available filmstrips together in tiles and details. Only visible previews are decoded and painted; newly scrolled-in assets join the shared animation position. List mode remains text-only. Stopping restores thumbnails; ordinary hover previews remain available.
 - The five stars set the rating on the entire selection. **Clear** sets zero stars. Mixed ratings show five unfilled stars until a value is chosen. Card size is in this top control panel and applies to tiles.
 - **Collections** opens the scratchpad between the main view and properties. It starts hidden every time. Create collections with **New** (collection01, collection02, …), rename them, or delete them. Deleting a collection does not delete any media.
 - Drag a main-view selection onto the collection list. If there are no collections, the first one is created automatically. Duplicate picks in one collection are ignored. Picked assets disappear from the main view, including when the collections panel is closed. Remove a pick or delete its collection to restore it; an asset remains hidden if another collection still contains it.
+- Drag a collection selection back onto the main view to remove those references from the source collection, just like **Remove selected from collection**. This works in tiles, details and list views, including dropping onto empty main-view space. Membership in other collections is preserved.
 - Collections are independent of the current search or category, with their own **Tiles / Details / List** selector and **Play all** toggle. Tiles is the default. Select items there to preview/rate them; the action dropdown applies to the whole collection. Unavailable assets remain listed with an unavailable label so references are not silently lost.
 - **Export / Import**, beside the collection management buttons, exchange simple JSON files. Both file browsers start in Downloads. Imports create a new collection, adding a numeric suffix for duplicate names. Files contain references, not media; assets resolve through configured, permitted libraries with matching roots and main paths.
 
 Stars and collection references are saved per user at `%APPDATA%/TinyLib/preferences.json` on Windows (`~/.config/TinyLib/preferences.json` without APPDATA). Override the path with `TINYLIB_USER_PREFS` if needed. Saves are atomic and reread existing preferences under a lock to preserve edits from other browser windows. Library databases, including the read-only performance library, are not modified by ratings or collections. Asset identity uses the library root and main path, so renaming a library label or migrating database IDs retains picks; relocating a root requires remapping preferences.
 
-Configure studio library roots and optional legacy path mappings in the studio configuration. Existing legacy databases are read through an adapter. New records use schema version 3 and relative media paths. On the first successful ingest into an old database, the worker writes `data.legacy.backup.json` before migrating the database. **Legacy browsers cannot read the new schema**; deploy TinyLib to all users before enabling ingest into the shared production library, or ingest into a separate library first.
+Configure studio library roots and optional legacy path mappings in the studio configuration. Existing legacy databases are read through an adapter. New records use schema version 3 and relative media paths. The first successful ingest or metadata edit of an old database writes `data.legacy.backup.json` before migrating it. **Legacy browsers cannot read the new schema**; deploy TinyLib to all users before enabling writes to the shared production library, or use a separate library first.
+
+## Asset properties
+
+The right panel shows descriptive fields without media file paths. **Edit properties** has a padlock and starts locked. With one asset selected in a writable library, admins and users with that library's ingest permission can unlock it, edit, then **Save** or **Cancel**. Library and type remain read-only. Editable fields include name, category, color space, keywords, footage frame range and metadata values. **Your stars** continues to save a personal rating in preferences.
+
+Changes are drafts until saved; locking again, cancelling or switching assets discards the draft. Name/category edits change database labels without moving folders, renaming media or changing collection identity. Saving rechecks permission, locks and rereads the database, and rejects conflicting edits to the same fields. Existing unknown database fields are preserved, and failed writes leave the database intact. Read-only libraries remain protected even for admins.
 
 ## Ingest
 
@@ -135,6 +144,7 @@ Workers stage files in `<library>/.tinylib-staging/<job-id>`. An exclusive libra
 python -m unittest discover -s tests -v
 python tests/qt_smoke.py
 python tests/qt_features.py
+python tests/qt_editing.py
 python tests/qt_access.py
 python tests/qt_performance.py
 python tests/player_smoke.py

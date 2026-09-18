@@ -198,6 +198,9 @@ class Library:
 
     def portable(self, record):
         result = copy.deepcopy(record)
+        for key in list(result):
+            if key.startswith('_'):
+                result.pop(key)
         for key in ('library', 'library_root'):
             result.pop(key, None)
         for key in ('main', 'thumb', 'proxy', 'filmstrip', 'highres'):
@@ -207,6 +210,35 @@ class Library:
                 except ValueError:
                     pass
         return result
+
+    def update_asset(self, original, changes):
+        """Patch changed metadata under lock; reject stale writes to the same field."""
+        from .asset_edit import validate_changes
+        validate_changes(original, changes)
+        with library_lock(self.root):
+            self.load()
+            matches = [asset for asset in self.assets if asset['id'] == original['id'] and asset['main'] == original['main']]
+            if len(matches) != 1:
+                raise ValueError('Asset changed or disappeared. Refresh the library before editing.')
+            current = matches[0]
+            for field in changes:
+                if current.get(field) != original.get(field):
+                    raise ValueError('Another user changed %s. Refresh before saving.' % field)
+            if not changes:
+                return current
+            current.update(copy.deepcopy(changes))
+            validate_changes(current, {})
+            database = self.root / 'data.json'
+            document = read_json(database) if database.exists() else {}
+            if document and document.get('schema_version') != 3:
+                backup = self.root / 'data.legacy.backup.json'
+                if not backup.exists():
+                    with open(backup, 'xb') as stream:
+                        stream.write(database.read_bytes())
+                document = {}
+            document.update(schema_version=3, assets=[self.portable(asset) for asset in self.assets])
+            atomic_json(database, document)
+            return current
 
     def publish(self, record, staging=None):
         """Reread under lock, preserve legacy DB backup, publish completed assets only."""

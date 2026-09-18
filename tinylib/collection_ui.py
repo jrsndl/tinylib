@@ -156,6 +156,7 @@ class CollectionsPanel(QtWidgets.QWidget):
         return self.preferences.collection(identifier)['assets'] if identifier else {}
 
     def populate(self, *_):
+        self.model.collection_origin = {'collection': self.combo.currentData(), 'preferences': str(self.preferences.path.resolve())}
         selected = {asset_key(a) for a in self.selected_assets()}
         assets = []
         for key, ref in self.entries().items():
@@ -235,6 +236,11 @@ class CollectionsPanel(QtWidgets.QWidget):
                 self.changed.emit()
             except Exception as error:
                 self.error.emit(str(error))
+
+    def remove_keys(self, identifier, keys):
+        self.preferences.remove_assets(identifier, keys)
+        self.populate()
+        self.changed.emit()
 
     def downloads(self):
         return QtCore.QStandardPaths.writableLocation(QtCore.QStandardPaths.DownloadLocation) or str(Path.home() / 'Downloads')
