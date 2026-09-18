@@ -6,7 +6,7 @@ The first launch against a configuration with no assigned users registers that a
 
 Admins use **Access rights…** to add Windows accounts, assign groups, and grant library visibility, ingestion, and individual actions. At least one admin must remain. Additional groups can be declared in the configuration and appear in the editor. The default library grants allow managers/users to browse and run bundled actions; only managers may ingest. `read_only` still disables ingestion for everyone.
 
-The asset properties editor uses the same view/ingest grants for metadata writes. Read-only libraries cannot be edited, including by admins. Every Save rechecks permissions; changing a display name/category preserves media paths and asset identity.
+The asset properties editor uses the same view/ingest grants for color-space, keyword and metadata writes. Read-only libraries cannot be edited, including by admins. Name, library, category, type and footage frame range are always read-only. Every Save rechecks permissions and preserves media paths and asset identity.
 
 Example configuration fragment (merge with your tools and processing settings):
 

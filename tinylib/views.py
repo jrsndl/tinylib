@@ -8,6 +8,7 @@ from .preferences import asset_key
 from .filters import duration
 from .preferences import ASSET_MIME, COLLECTION_MIME
 from .tile_text import DEFAULT_TEMPLATE, render_template, validate_template
+from .path_format import format_assets
 from pathlib import Path
 
 STYLE = '''
@@ -112,6 +113,8 @@ class AssetModel(QtCore.QAbstractTableModel):
         super().__init__(parent)
         self.assets = []
         self.collection_origin = None
+        self.path_notation = 'nuke'
+        self.revision = 0
 
     def rowCount(self, parent=QtCore.QModelIndex()):
         return 0 if parent.isValid() else len(self.assets)
@@ -143,6 +146,7 @@ class AssetModel(QtCore.QAbstractTableModel):
     def replace(self, assets):
         self.beginResetModel()
         self.assets = assets
+        self.revision += 1
         self.endResetModel()
 
     def flags(self, index):
@@ -159,6 +163,7 @@ class AssetModel(QtCore.QAbstractTableModel):
         if self.collection_origin:
             origin = dict(self.collection_origin, keys=[self.assets[row].get('_collection_key') or asset_key(self.assets[row]) for row in rows])
             data.setData(COLLECTION_MIME, json.dumps(origin).encode('utf-8'))
+        data.setText(format_assets([self.assets[row] for row in rows], self.path_notation))
         return data
 
     def supportedDragActions(self):
@@ -289,20 +294,55 @@ class Grid(QtWidgets.QListView):
         self.setDefaultDropAction(QtCore.Qt.CopyAction)
         self.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.cards = Cards(self, cache)
+        self.list_mode = False
+        self.list_revision = -1
         self.setItemDelegate(self.cards)
-        cache.changed.connect(self.viewport().update)
+        cache.changed.connect(self.cache_changed)
+
+    def cache_changed(self):
+        if not self.list_mode:
+            self.viewport().update()
+
+    def setModel(self, model):
+        previous = self.model()
+        if previous is not None:
+            try:
+                previous.modelReset.disconnect(self.update_list_geometry)
+            except (RuntimeError, TypeError):
+                pass
+        super().setModel(model)
+        if model is not None:
+            model.modelReset.connect(self.update_list_geometry)
+
+    def update_list_geometry(self):
+        if not self.list_mode or self.model() is None or self.list_revision == self.model().revision:
+            return
+        self.list_revision = self.model().revision
+        metrics = self.fontMetrics()
+        width = max((metrics.horizontalAdvance(str(asset.get('name', ''))) for asset in self.model().assets), default=80) + 28
+        self.setGridSize(QtCore.QSize(max(120, width), max(28, metrics.height() + 10)))
+        self.scheduleDelayedItemsLayout()
 
     def configure_mode(self, mode):
         if mode == 'List':
+            self.list_mode = True
             self.setViewMode(QtWidgets.QListView.ListMode)
             self.setFlow(QtWidgets.QListView.LeftToRight)
             self.setWrapping(True)
+            self.setLayoutMode(QtWidgets.QListView.SinglePass)
+            self.setResizeMode(QtWidgets.QListView.Fixed)
+            self.setTextElideMode(QtCore.Qt.ElideNone)
             self.setItemDelegate(QtWidgets.QStyledItemDelegate(self))
-            self.setGridSize(QtCore.QSize(240, 30))
+            self.list_revision = -1
+            self.update_list_geometry()
         else:
+            self.list_mode = False
             self.setViewMode(QtWidgets.QListView.IconMode)
             self.setFlow(QtWidgets.QListView.LeftToRight)
             self.setWrapping(True)
+            self.setLayoutMode(QtWidgets.QListView.Batched)
+            self.setResizeMode(QtWidgets.QListView.Adjust)
+            self.setTextElideMode(QtCore.Qt.ElideRight)
             self.setItemDelegate(self.cards)
             self.setGridSize(QtCore.QSize())
         self.setMovement(QtWidgets.QListView.Static)
@@ -311,7 +351,15 @@ class Grid(QtWidgets.QListView):
         self.setAcceptDrops(True)
         self.doItemsLayout()
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.list_mode:
+            self.scheduleDelayedItemsLayout()
+
     def mouseMoveEvent(self, event):
+        if self.list_mode:
+            super().mouseMoveEvent(event)
+            return
         index = self.indexAt(event.pos())
         row = index.row() if index.isValid() else -1
         if self.cards.hover_row != row:
@@ -320,6 +368,9 @@ class Grid(QtWidgets.QListView):
         super().mouseMoveEvent(event)
 
     def leaveEvent(self, event):
+        if self.list_mode:
+            super().leaveEvent(event)
+            return
         self.cards.hover_row = -1
         self.viewport().update()
         super().leaveEvent(event)

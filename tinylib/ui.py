@@ -2,7 +2,7 @@
 from pathlib import Path
 import math
 import json
-from .qt import QtCore, QtGui, QtWidgets
+from .qt import QtCore, QtGui, QtWidgets, HOSTED_IN_NUKE
 from .settings import load_settings
 from .preferences import Preferences, asset_key, COLLECTION_MIME
 from .filters import accepts
@@ -16,6 +16,7 @@ from .player import Player
 from .tile_text import DEFAULT_TEMPLATE, TOKENS, validate_template
 from .properties_ui import PropertiesEditor
 from .asset_edit import writable_library, save_asset
+from .path_format import FORMATS, format_assets
 
 
 class StarButton(QtWidgets.QPushButton):
@@ -84,13 +85,15 @@ class Browser(QtWidgets.QWidget):
         self.registry = ActionRegistry(self.settings['action_roots'])
         self.player = Player(self.settings, self)
         self.player.error.connect(self.show_error)
+        self.player.rating_requested.connect(self.rate_asset)
         self.preferences = Preferences(preferences_path)
         self.assets, self.errors = [], []
         self.selection_source = 'main'
         self._filtering = False
         self.setWindowTitle('TinyLib · Studio library')
         self.resize(1580, 900)
-        self.setStyleSheet(STYLE)
+        stylesheet = STYLE if HOSTED_IN_NUKE else (Path(__file__).with_name('standalone.qss').read_text(encoding='utf-8'))
+        self.setStyleSheet(stylesheet)
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 12)
         top = QtWidgets.QHBoxLayout()
@@ -137,6 +140,7 @@ class Browser(QtWidgets.QWidget):
         self.grid.cards.template = template
         self.grid.cards.info = self.info_toggle.isChecked()
         self.model = AssetModel(self)
+        self.model.path_notation = self.preferences.data.get('display', {}).get('path_notation', 'nuke')
         self.grid.setModel(self.model)
         self.table = DetailsView(self.grid.cards)
         self.table.setModel(self.model)
@@ -153,6 +157,7 @@ class Browser(QtWidgets.QWidget):
         main_layout.addWidget(self.stack, 1)
         self.splitter.addWidget(main)
         self.collections = CollectionsPanel(self.preferences, self.cache, self.access)
+        self.collections.model.path_notation = self.model.path_notation
         self.collections.hide()
         self.collections.changed.connect(self.collections_changed)
         self.collections.selected.connect(self.collection_selection)
@@ -182,6 +187,7 @@ class Browser(QtWidgets.QWidget):
         for widget in (self.grid, self.grid.viewport(), self.table, self.table.viewport(),
                        self.collections.grid, self.collections.grid.viewport(), self.collections.table, self.collections.table.viewport()):
             widget.installEventFilter(self)
+        self.detail_image.installEventFilter(self)
         self.grid.doubleClicked.connect(self.preview)
         self.table.doubleClicked.connect(self.preview)
         self.cache.changed.connect(self.update_detail_image)
@@ -239,6 +245,15 @@ class Browser(QtWidgets.QWidget):
         self.play_button.setCheckable(True)
         self.play_button.toggled.connect(self.set_play_all)
         row.addWidget(self.play_button)
+        row.addWidget(QtWidgets.QLabel('Paths'))
+        self.path_notation = QtWidgets.QComboBox()
+        for identifier, label in FORMATS:
+            self.path_notation.addItem(label, identifier)
+        selected_format = self.preferences.data.get('display', {}).get('path_notation', 'nuke')
+        self.path_notation.setCurrentIndex(max(0, self.path_notation.findData(selected_format)))
+        self.path_notation.currentIndexChanged.connect(self.change_path_notation)
+        self.path_notation.setToolTip('File-sequence notation used for external drags and clipboard copy.')
+        row.addWidget(self.path_notation)
         row.addStretch()
         self.collection_toggle = QtWidgets.QPushButton('Collections')
         self.collection_toggle.setCheckable(True)
@@ -444,6 +459,9 @@ class Browser(QtWidgets.QWidget):
     def eventFilter(self, watched, event):
         main_views = (self.grid, self.grid.viewport(), self.table, self.table.viewport())
         collection_views = (self.collections.grid, self.collections.grid.viewport(), self.collections.table, self.collections.table.viewport())
+        if watched is self.detail_image and event.type() == QtCore.QEvent.MouseButtonDblClick:
+            self.preview()
+            return True
         if watched in main_views and event.type() in (QtCore.QEvent.DragEnter, QtCore.QEvent.DragMove, QtCore.QEvent.Drop):
             try:
                 payload = json.loads(bytes(event.mimeData().data(COLLECTION_MIME)))
@@ -466,6 +484,17 @@ class Browser(QtWidgets.QWidget):
             self.selection_source = 'main' if watched in main_views else 'collection'
             if not event.isAutoRepeat():
                 self.preview()
+            return True
+        if watched in main_views + collection_views and event.type() == QtCore.QEvent.KeyPress and event.matches(QtGui.QKeySequence.Copy):
+            self.selection_source = 'main' if watched in main_views else 'collection'
+            self.copy_selected_paths()
+            return True
+        rating_keys = {QtCore.Qt.Key_0: 0, QtCore.Qt.Key_1: 1, QtCore.Qt.Key_2: 2,
+                       QtCore.Qt.Key_3: 3, QtCore.Qt.Key_4: 4, QtCore.Qt.Key_5: 5}
+        if watched in main_views and event.type() == QtCore.QEvent.KeyPress and event.key() in rating_keys:
+            self.selection_source = 'main'
+            if not event.isAutoRepeat():
+                self.rate_selected(rating_keys[event.key()])
             return True
         if event.type() in (QtCore.QEvent.FocusIn, QtCore.QEvent.MouseButtonPress):
             if watched in (self.grid, self.grid.viewport(), self.table, self.table.viewport()):
@@ -513,25 +542,19 @@ class Browser(QtWidgets.QWidget):
                                          '\n\n' + '\n'.join(a['name'] for a in assets))
         self.update_detail_image()
 
-    def save_properties(self, original, changes, stars):
+    def save_properties(self, original, changes):
         try:
             updated = save_asset(self.settings, self.access, original, changes)
         except Exception as error:
             self.properties.message.setText(str(error))
             return
-        warning = ''
-        try:
-            if self.preferences.rating(updated) != stars:
-                self.preferences.rate([updated], stars)
-        except Exception as error:
-            warning = 'Metadata saved, but your star rating could not be saved: ' + str(error)
         for asset in self.assets:
             if asset_key(asset) == asset_key(original):
                 asset.clear()
                 asset.update(updated)
         self.properties.cancel_edit()
         self.loaded(self.assets, [])
-        self.status.setText(warning or 'Asset properties saved.')
+        self.status.setText('Asset properties saved.')
 
     def toggle_tile_info(self, enabled):
         self.grid.cards.info = enabled
@@ -554,6 +577,24 @@ class Browser(QtWidgets.QWidget):
                 self.grid.viewport().update()
             except Exception as error:
                 self.show_error(str(error))
+
+    def change_path_notation(self, *_):
+        notation = self.path_notation.currentData()
+        if hasattr(self, 'model'):
+            self.model.path_notation = notation
+        if hasattr(self, 'collections'):
+            self.collections.model.path_notation = notation
+        try:
+            self.preferences.set_display(path_notation=notation)
+        except Exception as error:
+            self.show_error(str(error))
+
+    def copy_selected_paths(self):
+        assets = self.selected_assets()
+        if not assets:
+            return
+        QtWidgets.QApplication.clipboard().setText(format_assets(assets, self.path_notation.currentData()))
+        self.status.setText('Copied %d asset path%s.' % (len(assets), '' if len(assets) == 1 else 's'))
 
     def update_detail_image(self):
         asset = self.selected()
@@ -642,6 +683,19 @@ class Browser(QtWidgets.QWidget):
                                        {'parent': self, 'settings': self.settings,
                                         'collection': self.collections.combo.currentText() if collection else None})
             self.status.setText(str(result) if isinstance(result, str) else 'Action completed.')
+        except Exception as error:
+            self.show_error(str(error))
+
+    def rate_asset(self, asset, stars):
+        try:
+            self.preferences.rate([asset], stars)
+            key = asset_key(asset)
+            for current in self.assets:
+                if asset_key(current) == key:
+                    current['_rating'] = stars
+            self.collections.populate()
+            self.filter()
+            self.status.setText('Set %s to %d star%s.' % (asset.get('name', 'asset'), stars, '' if stars == 1 else 's'))
         except Exception as error:
             self.show_error(str(error))
 

@@ -4,7 +4,7 @@ import math
 from .access import root_key
 from .library import Library
 
-EDITABLE = {'name', 'category', 'colorspace', 'tags', 'metadata', 'first', 'last'}
+EDITABLE = {'colorspace', 'tags', 'metadata'}
 
 
 def writable_library(settings, access, asset):

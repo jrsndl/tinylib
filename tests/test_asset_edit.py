@@ -25,8 +25,8 @@ class AssetEditTests(unittest.TestCase):
         self.asset = self.library.load()[0]
 
     def test_metadata_edit_preserves_paths_identity_and_other_top_level_fields(self):
-        saved = save_asset(self.config, self.access, self.asset, {'name': 'New name', 'category': 'flame', 'tags': ['hot']})
-        self.assertEqual(saved['name'], 'New name')
+        saved = save_asset(self.config, self.access, self.asset, {'colorspace': 'ACES2065-1', 'tags': ['hot']})
+        self.assertEqual(saved['colorspace'], 'ACES2065-1')
         for field in ('main', 'id', 'kind', 'library_root'):
             self.assertEqual(saved[field], self.asset[field])
         self.assertTrue(read_json(self.root / 'data.json')['studio_extra'])
@@ -36,32 +36,32 @@ class AssetEditTests(unittest.TestCase):
         save_asset(self.config, self.access, self.asset, {'tags': ['new']})
         with self.assertRaises(ValueError):
             save_asset(self.config, self.access, self.asset, {'tags': ['lost update']})
-        saved = save_asset(self.config, self.access, self.asset, {'name': 'Renamed'})
+        saved = save_asset(self.config, self.access, self.asset, {'colorspace': 'sRGB'})
         self.assertEqual(saved['tags'], ['new'])
 
     def test_readonly_denied_and_immutable_fields_rejected(self):
         before = (self.root / 'data.json').read_bytes()
         self.config['libraries'][0]['read_only'] = True
         with self.assertRaises(PermissionError):
-            save_asset(self.config, self.access, self.asset, {'name': 'No'})
+            save_asset(self.config, self.access, self.asset, {'colorspace': 'No'})
         self.config['libraries'][0]['read_only'] = False
         denied = copy.deepcopy(self.config)
         denied['access'] = {'groups': ['restricted'], 'users': {'test': ['restricted']}}
         with self.assertRaises(PermissionError):
-            save_asset(self.config, AccessControl(denied, identity='test', persist=False), self.asset, {'name': 'No'})
-        for field in ('main', 'kind', 'library', 'id'):
+            save_asset(self.config, AccessControl(denied, identity='test', persist=False), self.asset, {'colorspace': 'No'})
+        for field in ('name', 'category', 'first', 'last', 'main', 'kind', 'library', 'id'):
             with self.assertRaises(ValueError):
                 save_asset(self.config, self.access, self.asset, {field: 'No'})
         self.assertEqual((self.root / 'data.json').read_bytes(), before)
 
     def test_invalid_fields_and_failed_write_leave_database_unchanged(self):
         before = (self.root / 'data.json').read_bytes()
-        for change in ({'name': ''}, {'metadata': {'width': -1}}, {'first': 1200}, {'tags': 'text'}):
+        for change in ({'colorspace': ''}, {'metadata': {'width': -1}}, {'tags': 'text'}):
             with self.assertRaises(ValueError):
                 save_asset(self.config, self.access, self.asset, change)
         with patch('tinylib.library.atomic_json', side_effect=OSError('disk full')):
             with self.assertRaises(OSError):
-                save_asset(self.config, self.access, self.asset, {'name': 'Failed'})
+                save_asset(self.config, self.access, self.asset, {'colorspace': 'Failed'})
         self.assertEqual((self.root / 'data.json').read_bytes(), before)
 
     def test_legacy_edit_keeps_backup(self):
@@ -69,9 +69,9 @@ class AssetEditTests(unittest.TestCase):
         atomic_json(self.root / 'data.json', legacy)
         before = (self.root / 'data.json').read_bytes()
         asset = self.library.load()[0]
-        save_asset(self.config, self.access, asset, {'name': 'New label'})
+        save_asset(self.config, self.access, asset, {'tags': ['new']})
         self.assertEqual((self.root / 'data.legacy.backup.json').read_bytes(), before)
-        self.assertEqual(self.library.load()[0]['name'], 'New label')
+        self.assertEqual(self.library.load()[0]['tags'], ['new'])
 
     def test_tile_tokens_and_literal_newlines(self):
         self.assertEqual(render_template(r'{name}\n{width} × {height}', self.asset), 'Test\n1920 × 1080')

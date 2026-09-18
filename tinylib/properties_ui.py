@@ -25,7 +25,7 @@ def visible_metadata(key, value):
 
 
 class PropertiesEditor(QtWidgets.QWidget):
-    save_requested = QtCore.Signal(object, object, int)
+    save_requested = QtCore.Signal(object, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -41,23 +41,35 @@ class PropertiesEditor(QtWidgets.QWidget):
         scroll = QtWidgets.QScrollArea()
         scroll.setWidgetResizable(True)
         content = QtWidgets.QWidget()
-        self.form = QtWidgets.QFormLayout(content)
-        self.form.setRowWrapPolicy(QtWidgets.QFormLayout.WrapAllRows)
+        content_layout = QtWidgets.QVBoxLayout(content)
+        content_layout.setContentsMargins(4, 4, 4, 4)
+        self.summary = QtWidgets.QFormLayout()
+        self.summary.setVerticalSpacing(2)
+        self.summary.setHorizontalSpacing(8)
+        self.summary.setFieldGrowthPolicy(QtWidgets.QFormLayout.AllNonFixedFieldsGrow)
+        self.form = QtWidgets.QFormLayout()
+        self.form.setVerticalSpacing(5)
+        self.form.setHorizontalSpacing(8)
         for label, key in [('Name', 'name'), ('Library', 'library'), ('Category', 'category'), ('Type', 'kind'),
-                           ('Color space', 'colorspace'), ('Keywords (comma separated)', 'tags'),
-                           ('First frame', 'first'), ('Last frame', 'last')]:
+                           ('Range', 'range'), ('Color space', 'colorspace'),
+                           ('Keywords', 'tags')]:
             field = QtWidgets.QLineEdit()
+            field.setMaximumHeight(27)
             self.fields[key] = field
-            self.form.addRow(label, field)
-        self.stars = QtWidgets.QSpinBox()
-        self.stars.setRange(0, 5)
-        self.form.addRow('Your stars', self.stars)
+            target = self.summary if key in ('name', 'library', 'category', 'kind', 'range') else self.form
+            target.addRow(label, field)
+        content_layout.addLayout(self.summary)
+        separator = QtWidgets.QFrame()
+        separator.setFrameShape(QtWidgets.QFrame.HLine)
+        content_layout.addWidget(separator)
+        content_layout.addLayout(self.form)
         self.metadata = QtWidgets.QTableWidget(0, 2)
         self.metadata.setHorizontalHeaderLabels(['Metadata', 'Value'])
         self.metadata.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
         self.metadata.verticalHeader().hide()
         self.metadata.setMinimumHeight(150)
         self.form.addRow(self.metadata)
+        content_layout.addStretch()
         scroll.setWidget(content)
         layout.addWidget(scroll, 1)
         self.message = QtWidgets.QLabel()
@@ -90,12 +102,12 @@ class PropertiesEditor(QtWidgets.QWidget):
     def fill(self):
         asset = self.asset or {}
         for key, field in self.fields.items():
-            value = asset.get(key, '')
+            value = ('%s-%s' % (asset.get('first'), asset.get('last'))
+                     if key == 'range' and asset.get('kind') == 'footage' else asset.get(key, ''))
             field.setText(', '.join(value) if key == 'tags' else '' if value is None else str(value))
-            if key in ('first', 'last'):
+            if key == 'range':
                 field.setVisible(asset.get('kind') == 'footage')
-                self.form.labelForField(field).setVisible(field.isVisibleTo(self))
-        self.stars.setValue(asset.get('_rating', 0))
+                self.summary.labelForField(field).setVisible(asset.get('kind') == 'footage')
         self.metadata.setRowCount(0)
         for key, value in asset.get('metadata', {}).items():
             if not visible_metadata(key, value):
@@ -111,8 +123,8 @@ class PropertiesEditor(QtWidgets.QWidget):
         self.lock.setIcon(lock_icon(editing))
         self.lock.setText('Editing — unlocked' if editing else 'Edit properties')
         for key, field in self.fields.items():
-            field.setReadOnly(not editing or key in ('library', 'kind'))
-        self.stars.setEnabled(editing)
+            field.setReadOnly(not editing or key in ('name', 'library', 'category', 'kind', 'range'))
+            field.setStyleSheet('color: #888; background: #252525;' if key in ('name', 'library', 'category', 'kind', 'range') else '')
         self.metadata.setEditTriggers(QtWidgets.QAbstractItemView.DoubleClicked | QtWidgets.QAbstractItemView.EditKeyPressed if editing else QtWidgets.QAbstractItemView.NoEditTriggers)
         self.buttons.setVisible(editing)
         if not editing and self.asset:
@@ -125,11 +137,8 @@ class PropertiesEditor(QtWidgets.QWidget):
         if not self.asset or not self.lock.isChecked():
             return
         try:
-            updated = {key: self.fields[key].text().strip() for key in ('name', 'category', 'colorspace')}
+            updated = {'colorspace': self.fields['colorspace'].text().strip()}
             updated['tags'] = list(dict.fromkeys(tag.strip() for tag in self.fields['tags'].text().split(',') if tag.strip()))
-            if self.asset.get('kind') == 'footage':
-                for key in ('first', 'last'):
-                    updated[key] = int(self.fields[key].text())
             metadata = copy.deepcopy(self.asset.get('metadata', {}))
             for row in range(self.metadata.rowCount()):
                 key = self.metadata.item(row, 0).text()
@@ -137,6 +146,6 @@ class PropertiesEditor(QtWidgets.QWidget):
                 metadata[key] = text if isinstance(metadata[key], str) else json.loads(text)
             updated['metadata'] = metadata
             changes = {key: value for key, value in updated.items() if value != self.asset.get(key)}
-            self.save_requested.emit(self.asset, changes, self.stars.value())
+            self.save_requested.emit(self.asset, changes)
         except (ValueError, TypeError) as error:
             self.message.setText(str(error))

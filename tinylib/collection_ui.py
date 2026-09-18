@@ -5,6 +5,7 @@ from .qt import QtCore, QtWidgets
 from .preferences import asset_key, ASSET_MIME
 from .views import AssetModel, Grid, DetailsView
 from .action_ui import ActionPicker
+from .path_format import format_assets
 
 
 class CollectionGrid(Grid):
@@ -69,7 +70,7 @@ class CollectionsPanel(QtWidgets.QWidget):
         layout.addWidget(self.combo)
         controls = QtWidgets.QHBoxLayout()
         for label, callback in [('New', self.create), ('Rename', self.rename), ('Delete', self.delete),
-                                ('Export', self.export_file), ('Import', self.import_file)]:
+                                ('Copy', self.copy_paths), ('Export', self.export_file), ('Import', self.import_file)]:
             button = QtWidgets.QPushButton(label)
             button.setStyleSheet('padding: 5px 4px;')
             button.clicked.connect(callback)
@@ -241,6 +242,17 @@ class CollectionsPanel(QtWidgets.QWidget):
         self.preferences.remove_assets(identifier, keys)
         self.populate()
         self.changed.emit()
+
+    def copy_paths(self):
+        assets = list(self.model.assets)
+        selected = self.selected_assets()
+        if selected and len(selected) < len(assets):
+            assets = selected
+        if not assets:
+            self.error.emit('The current collection has no accessible assets to copy.')
+            return
+        notation = self.preferences.data.get('display', {}).get('path_notation', 'nuke')
+        QtWidgets.QApplication.clipboard().setText(format_assets(assets, notation))
 
     def downloads(self):
         return QtCore.QStandardPaths.writableLocation(QtCore.QStandardPaths.DownloadLocation) or str(Path.home() / 'Downloads')

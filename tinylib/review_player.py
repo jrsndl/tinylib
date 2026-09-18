@@ -205,6 +205,7 @@ class ReviewPlayer(QtWidgets.QWidget):
     error = QtCore.Signal(str)
     closed = QtCore.Signal()
     frame_shown = QtCore.Signal(int)
+    rating_requested = QtCore.Signal(int)
 
     def __init__(self, settings, asset, stream, parent=None):
         super().__init__(parent, QtCore.Qt.Window)
@@ -222,6 +223,8 @@ class ReviewPlayer(QtWidgets.QWidget):
         self.target = 0
         self.direction, self.speed = (1 if self.count > 1 else 0), 1
         self.overlay = True
+        self.rating = max(0, min(5, int(asset.get('_rating', 0))))
+        self.rating_feedback = ''
         self.loop = True
         self.picture = QtGui.QImage()
         self.pending = True
@@ -263,6 +266,10 @@ class ReviewPlayer(QtWidgets.QWidget):
         self.debounce.setSingleShot(True)
         self.debounce.setInterval(35)
         self.debounce.timeout.connect(lambda: self.seek(self.target))
+        self.rating_timer = QtCore.QTimer(self)
+        self.rating_timer.setSingleShot(True)
+        self.rating_timer.setInterval(1200)
+        self.rating_timer.timeout.connect(self.clear_rating_feedback)
         self.clock = QtCore.QElapsedTimer()
         self.clock.start()
         self.timer = QtCore.QTimer(self)
@@ -370,10 +377,18 @@ class ReviewPlayer(QtWidgets.QWidget):
 
     def keyPressEvent(self, event):
         key = event.key()
-        if key in (QtCore.Qt.Key_J, QtCore.Qt.Key_K, QtCore.Qt.Key_L, QtCore.Qt.Key_Space, QtCore.Qt.Key_O) and event.isAutoRepeat():
+        ratings = {QtCore.Qt.Key_0: 0, QtCore.Qt.Key_1: 1, QtCore.Qt.Key_2: 2,
+                   QtCore.Qt.Key_3: 3, QtCore.Qt.Key_4: 4, QtCore.Qt.Key_5: 5}
+        if key in ({QtCore.Qt.Key_J, QtCore.Qt.Key_K, QtCore.Qt.Key_L, QtCore.Qt.Key_Space, QtCore.Qt.Key_O} | set(ratings)) and event.isAutoRepeat():
             event.accept()
             return
-        if key == QtCore.Qt.Key_J:
+        if key in ratings:
+            self.rating = ratings[key]
+            self.rating_feedback = 'Rating: %d / 5' % self.rating
+            self.rating_requested.emit(self.rating)
+            self.rating_timer.start()
+            self.update()
+        elif key == QtCore.Qt.Key_J:
             self.play_direction(-1)
         elif key == QtCore.Qt.Key_L:
             self.play_direction(1)
@@ -394,6 +409,10 @@ class ReviewPlayer(QtWidgets.QWidget):
             super().keyPressEvent(event)
             return
         event.accept()
+
+    def clear_rating_feedback(self):
+        self.rating_feedback = ''
+        self.update()
 
     def mouseMoveEvent(self, event):
         self.bar.setVisible(event.pos().y() >= self.height() - 90 or self.scrubbing)
@@ -427,11 +446,17 @@ class ReviewPlayer(QtWidgets.QWidget):
             painter.setPen(QtGui.QColor('#eeeeee'))
             message = self.failure or 'Loading preview…'
             painter.drawText(self.rect().adjusted(24, 20, -24, -20), QtCore.Qt.AlignTop | QtCore.Qt.TextWordWrap, message)
+        if self.rating_feedback:
+            box = QtCore.QRect(self.width() - 160, 16, 144, 32)
+            painter.fillRect(box, QtGui.QColor(0, 0, 0, 190))
+            painter.setPen(QtGui.QColor('#d4aa6c'))
+            painter.drawText(box, QtCore.Qt.AlignCenter, self.rating_feedback)
         painter.end()
 
     def closeEvent(self, event):
         self.timer.stop()
         self.debounce.stop()
+        self.rating_timer.stop()
         self.decoder.close()
         self.closed.emit()
         super().closeEvent(event)

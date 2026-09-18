@@ -51,6 +51,7 @@ class Player(QtCore.QObject):
     error = QtCore.Signal(str)
     started = QtCore.Signal()
     finished = QtCore.Signal()
+    rating_requested = QtCore.Signal(object, int)
 
     def __init__(self, settings, parent=None):
         super().__init__(parent)
@@ -111,6 +112,7 @@ class Player(QtCore.QObject):
             window = ReviewPlayer(self.settings, asset, stream)
             self.windows.add(window)
             window.error.connect(self.error)
+            window.rating_requested.connect(lambda rating, selected=asset: self.rating_requested.emit(selected, rating))
             def closed():
                 self.windows.discard(window)
                 self.finished.emit()

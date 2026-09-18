@@ -35,7 +35,9 @@ QtGui.QFontDatabase.addApplicationFont('C:/Windows/Fonts/segoeui.ttf')
 app.setFont(QtGui.QFont('Segoe UI', 10))
 controller = Player(settings)
 errors = []
+ratings = []
 controller.error.connect(errors.append)
+controller.rating_requested.connect(lambda asset, rating: ratings.append((asset['name'], rating)))
 
 
 def pump(ms=30):
@@ -77,6 +79,10 @@ wait(lambda: bool(controller.windows), 'player launch')
 window = next(iter(controller.windows))
 wait(lambda: window.current >= 2, 'autoplay')
 assert window.loop and window.loop_toggle.isChecked()
+key(QtCore.Qt.Key_5)
+key(QtCore.Qt.Key_0)
+assert ratings == [('Review controls', 5), ('Review controls', 0)]
+assert window.rating == 0 and window.rating_feedback == 'Rating: 0 / 5'
 key(QtCore.Qt.Key_K)
 assert window.direction == 0 and window.speed == 1
 window.decoder.limit = 64  # Force eviction during random-access tests.

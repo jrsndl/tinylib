@@ -13,6 +13,8 @@ The demo reads `testdata/demolib/data.json`, remaps its old legacy absolute path
 
 For a production browser, run `python launch.py` or load it inside Nuke. Python 3.9+ and the matching PySide binding are required; Nuke supplies its own Qt runtime.
 
+Standalone TinyLib uses the studio-style dark Qt template in `tinylib/standalone.qss`. Nuke-hosted TinyLib retains its Nuke-matched stylesheet. Bitmap references from the supplied standalone template are intentionally replaced by Qt's built-in arrows, checks and navigation glyphs, so the controls remain readable without a resource bundle.
+
 Configure a read-only library in `config/performance.local.json` to isolate performance testing from other libraries:
 
 ```powershell
@@ -51,6 +53,7 @@ Previews autoplay in the TinyLib player using FFmpeg decoding. The frame overlay
 | **Space** | Stop, or start forward playback at 1×. |
 | **Left / Right** | Stop and step one frame backward / forward. |
 | **O** | Toggle the frame-number overlay. |
+| **0–5** | Set the current asset's personal star rating; `0` clears it. |
 | **Hover near the bottom** | Reveal the timeline and current time; click or drag its indicator to scrub. Scrubbing stops playback. |
 | **Loop** | Enabled by default for each player window. Wraps in both directions; when disabled, playback stops at either end and resets speed. |
 | **Esc / Q** | Close the player. |
@@ -80,6 +83,8 @@ The filtering panel combines fulltext search, an **Invert** checkbox (applies on
 - **Tiles** is the default, with thumbnails and hover filmstrips. **Details** presents rows with a tiny preview and columns for name, library, category, media type, duration, dimensions, stars and keywords. **List** shows asset names in multiple columns when space permits. Selection is preserved when switching views.
 - **Info**, at the far right of the main view's top controls, hides or shows tile captions and the gray star row. With Info off, tiles contain only preview rectangles. **Tile text…** configures captions with tokens and literal `\n` or real new lines (up to six). Supported tokens are `{name}`, `{library}`, `{category}`, `{type}`, `{colorspace}`, `{tags}`, `{width}`, `{height}`, `{fps}`, `{length}` (seconds), `{first}` and `{last}`. Example: `{name}\n{width} × {height}`. Both settings are saved in user preferences; a studio `tile_template` provides the initial template.
 - Press **Enter** with exactly one selected asset to open its player in any view mode. Multiple selections do not open players.
+- With focus in the main view, press **1–5** to rate the selected assets or **0** to clear their personal rating. The same shortcuts work in the player for its current asset.
+- **Paths** chooses the per-user file-sequence notation used by external drag-and-drop, **Ctrl+C**, collection **Copy**, and the bundled Copy paths action. All output uses forward slashes. Nuke (default) writes `files.####.exr 1001-1100`; AYON expands every frame and joins paths with comma-space; Hashtag omits the range; Houdini uses `$F`; Flame uses `files.[1001-1100].exr`; Printf uses `%04d`; Fallback copies the main file's parent folder. Stills remain ordinary file paths except in Fallback mode.
 - Use Ctrl-click, Shift-click or Ctrl+A for multi-selection. Import main/highres and star-rating actions apply to the selected assets. The properties panel summarizes multi-selection; opening a preview requires one selected asset.
 - **Play all / Stop all** animates the available filmstrips together in tiles and details. Only visible previews are decoded and painted; newly scrolled-in assets join the shared animation position. List mode remains text-only. Stopping restores thumbnails; ordinary hover previews remain available.
 - The five stars set the rating on the entire selection. **Clear** sets zero stars. Mixed ratings show five unfilled stars until a value is chosen. Card size is in this top control panel and applies to tiles.
@@ -88,6 +93,7 @@ The filtering panel combines fulltext search, an **Invert** checkbox (applies on
 - Drag a collection selection back onto the main view to remove those references from the source collection, just like **Remove selected from collection**. This works in tiles, details and list views, including dropping onto empty main-view space. Membership in other collections is preserved.
 - Collections are independent of the current search or category, with their own **Tiles / Details / List** selector and **Play all** toggle. Tiles is the default. Select items there to preview/rate them; the action dropdown applies to the whole collection. Unavailable assets remain listed with an unavailable label so references are not silently lost.
 - **Export / Import**, beside the collection management buttons, exchange simple JSON files. Both file browsers start in Downloads. Imports create a new collection, adding a numeric suffix for duplicate names. Files contain references, not media; assets resolve through configured, permitted libraries with matching roots and main paths.
+- **Copy** uses the selected Paths notation. A partial selection copies only those collection items. With no selection or the complete collection selected, it copies the entire current collection.
 
 Stars and collection references are saved per user at `%APPDATA%/TinyLib/preferences.json` on Windows (`~/.config/TinyLib/preferences.json` without APPDATA). Override the path with `TINYLIB_USER_PREFS` if needed. Saves are atomic and reread existing preferences under a lock to preserve edits from other browser windows. Library databases, including the read-only performance library, are not modified by ratings or collections. Asset identity uses the library root and main path, so renaming a library label or migrating database IDs retains picks; relocating a root requires remapping preferences.
 
@@ -95,9 +101,9 @@ Configure studio library roots and optional legacy path mappings in the studio c
 
 ## Asset properties
 
-The right panel shows descriptive fields without media file paths. **Edit properties** has a padlock and starts locked. With one asset selected in a writable library, admins and users with that library's ingest permission can unlock it, edit, then **Save** or **Cancel**. Library and type remain read-only. Editable fields include name, category, color space, keywords, footage frame range and metadata values. **Your stars** continues to save a personal rating in preferences.
+The right panel shows descriptive fields without media file paths. Double-click its thumbnail to open the player. **Edit properties** has a padlock and starts locked. Compact read-only identity fields appear first: name, library, category, type and a footage **Range** such as `1001-1100`. With one asset selected in a writable library, admins and users with that library's ingest permission can unlock color space, keywords and metadata, then **Save** or **Cancel**. Personal star ratings remain in the main toolbar and tiles; they are not presented as an asset property.
 
-Changes are drafts until saved; locking again, cancelling or switching assets discards the draft. Name/category edits change database labels without moving folders, renaming media or changing collection identity. Saving rechecks permission, locks and rereads the database, and rejects conflicting edits to the same fields. Existing unknown database fields are preserved, and failed writes leave the database intact. Read-only libraries remain protected even for admins.
+Changes are drafts until saved; locking again, cancelling or switching assets discards the draft. Saving rechecks permission, locks and rereads the database, and rejects conflicting edits to the same fields. Existing unknown database fields are preserved, and failed writes leave the database intact. Read-only libraries remain protected even for admins.
 
 ## Ingest
 
