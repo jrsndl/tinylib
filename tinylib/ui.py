@@ -2,6 +2,7 @@
 from pathlib import Path
 import math
 import json
+import time
 from .qt import QtCore, QtGui, QtWidgets, HOSTED_IN_NUKE
 from .settings import load_settings
 from .preferences import Preferences, asset_key, COLLECTION_MIME
@@ -17,6 +18,7 @@ from .tile_text import DEFAULT_TEMPLATE, TOKENS, validate_template
 from .properties_ui import PropertiesEditor
 from .asset_edit import writable_library, save_asset
 from .path_format import FORMATS, format_assets
+from .asset_types import ASSET_TYPES
 
 
 class StarButton(QtWidgets.QPushButton):
@@ -112,7 +114,7 @@ class Browser(QtWidgets.QWidget):
         config_button.setEnabled(self.access.is_admin)
         top.addWidget(config_button)
         self.refresh = QtWidgets.QPushButton('Refresh')
-        self.refresh.clicked.connect(self.reload)
+        self.refresh.clicked.connect(lambda: self.reload(False))
         top.addWidget(self.refresh)
         self.ingest_button = QtWidgets.QPushButton('+ Ingest asset')
         self.ingest_button.setObjectName('primary')
@@ -130,6 +132,7 @@ class Browser(QtWidgets.QWidget):
         main_layout.setContentsMargins(0, 0, 0, 0)
         self.make_controls(main_layout)
         self.cache = ImageCache(self)
+        self.cache.activity.connect(self.preview_progress)
         self.grid = Grid(self.cache)
         display = self.preferences.data.get('display', {})
         template = display.get('tile_template', self.settings.get('tile_template', DEFAULT_TEMPLATE))
@@ -170,7 +173,14 @@ class Browser(QtWidgets.QWidget):
         layout.addWidget(self.splitter, 1)
         self.status = QtWidgets.QLabel('Loading libraries…')
         self.status.setObjectName('muted')
+        self._asset_status = ''
+        self.update_status_tooltip()
         layout.addWidget(self.status)
+        self.loading_timer = QtCore.QTimer(self)
+        self.loading_timer.setInterval(250)
+        self.loading_timer.timeout.connect(self.render_library_progress)
+        self._library_progress = None
+        self._library_load_started = 0.0
         self.debounce = QtCore.QTimer(self)
         self.debounce.setSingleShot(True)
         self.debounce.setInterval(140)
@@ -219,8 +229,9 @@ class Browser(QtWidgets.QWidget):
         self.tag_picker.activated.connect(self.pick_tag)
         filters.addWidget(self.tag_picker)
         self.kind = QtWidgets.QComboBox()
-        for text, data in [('All media', ''), ('Footage', 'footage'), ('Stills / HDRI', 'stills')]:
-            self.kind.addItem(text, data)
+        self.kind.addItem('All asset types', '')
+        for identifier, definition in ASSET_TYPES.items():
+            self.kind.addItem(definition['label'], identifier)
         filters.addWidget(self.kind)
         layout.addLayout(filters)
         numeric = QtWidgets.QHBoxLayout()
@@ -341,11 +352,14 @@ class Browser(QtWidgets.QWidget):
             widget.value.setValue(0)
         self.filter()
 
-    def reload(self):
+    def reload(self, use_index_cache=True):
         if hasattr(self, 'loader') and self.loader.isRunning():
             return
         self.refresh.setEnabled(False)
-        self.status.setText('Loading libraries…')
+        self.status.setText('Preparing library load…')
+        self._library_progress = None
+        self._library_load_started = time.perf_counter()
+        self.loading_timer.start()
         try:
             self.access.refresh()
             configs = [library for library in self.settings['libraries'] if self.access.can(library['root'], 'view')]
@@ -356,12 +370,63 @@ class Browser(QtWidgets.QWidget):
         self.registry.reload()
         self.ingest_button.setEnabled(any(not library.get('read_only') and self.access.can(library['root'], 'ingest') for library in configs))
         self.access_button.setVisible(self.access.is_admin)
-        self.loader = Loader(configs, self)
+        self.loader = Loader(configs, self, use_index_cache=use_index_cache)
+        self.loader.progress.connect(self.library_progress)
         self.loader.loaded.connect(self.loaded)
+        self.loader.finished.connect(self.loading_timer.stop)
         self.loader.finished.connect(lambda: self.refresh.setEnabled(True))
         self.loader.start()
 
+    def library_progress(self, progress):
+        self._library_progress = progress
+        self.render_library_progress()
+
+    def render_library_progress(self):
+        progress = self._library_progress
+        if not progress:
+            elapsed = time.perf_counter() - self._library_load_started
+            self.status.setText('Preparing library load · %.1f s' % elapsed)
+            return
+        elapsed = time.perf_counter() - self._library_load_started
+        if progress['phase'] == 'reading':
+            self.status.setText('Libraries %d/%d · reading %s · %d assets found · %.1f s' %
+                                (progress['index'], progress['total'], progress['name'],
+                                 progress['assets'], elapsed))
+        elif progress['phase'] == 'normalizing':
+            self.status.setText('Libraries %d/%d · %s · resolving media paths %d/%d · %.1f s' %
+                                (progress['index'], progress['total'], progress['name'],
+                                 progress['current'], progress['record_total'], elapsed))
+        else:
+            source = 'local index' if progress.get('index_cache_hit') else 'network scan'
+            self.status.setText('Libraries %d/%d · %s: %d assets · %d total · %s · %.1f s' %
+                                (progress['index'], progress['total'], progress['name'],
+                                 progress['library_assets'], progress['assets'], source, elapsed))
+
+    def preview_progress(self, progress):
+        if not self._asset_status:
+            return
+        unavailable = ' · %d unavailable' % progress['failures'] if progress['failures'] else ''
+        if progress['pending']:
+            self.status.setText('%s · previews %d/%d · %d local · %d source · %d pending · %.1f s%s' %
+                                (self._asset_status, progress['completed'], progress['requested'],
+                                 progress['disk_hits'], progress['source_loads'],
+                                 progress['pending'], progress['seconds'], unavailable))
+        elif progress['requested']:
+            self.status.setText('%s · previews ready: %d local, %d source · %.1f s%s' %
+                                (self._asset_status, progress['disk_hits'],
+                                 progress['source_loads'], progress['seconds'], unavailable))
+        else:
+            self.status.setText(self._asset_status + ' · waiting for visible previews…')
+        self.update_status_tooltip()
+
+    def update_status_tooltip(self):
+        lines = list(getattr(self, 'errors', []))
+        lines.append('Local thumbnail cache: ' + str(self.cache.disk_root))
+        self.status.setToolTip('\n'.join(lines))
+
     def loaded(self, assets, errors):
+        self.loading_timer.stop()
+        self.status.setText('Building browser index for %d assets…' % len(assets))
         try:
             self.access.refresh()
             assets = [asset for asset in assets if self.access.can(asset['library_root'], 'view')]
@@ -423,7 +488,7 @@ class Browser(QtWidgets.QWidget):
         picked = self.preferences.picked_keys()
         result = [a for a in self.assets if (not root or a['library_root'] == root)
                   and (not category or a['category'] == category or a['category'].startswith(category + '/'))
-                  and (not kind or (a.get('kind') != 'footage' if kind == 'stills' else a.get('kind') == kind))
+                  and (not kind or a.get('kind') == kind)
                   and asset_key(a) not in picked
                   and accepts(a, self.search.text(), self.invert.isChecked(), self.tags.text().split(','),
                               self.length_filter.rule(), self.width_filter.rule(), self.stars_filter.rule(), a['_rating'])]
@@ -436,8 +501,8 @@ class Browser(QtWidgets.QWidget):
         self._filtering = False
         self.selection()
         error = '  ·  %d library error(s) — see tooltip' % len(self.errors) if self.errors else ''
-        self.status.setText('%s assets  /  %s total  ·  %s picked%s' % (len(result), len(self.assets), len(picked), error))
-        self.status.setToolTip('\n'.join(self.errors))
+        self._asset_status = '%s assets / %s total · %s picked%s' % (len(result), len(self.assets), len(picked), error)
+        self.preview_progress(self.cache.snapshot())
 
     def main_selected(self):
         rows = sorted({index.row() for index in self.grid.selectionModel().selectedIndexes()})

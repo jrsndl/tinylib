@@ -27,7 +27,7 @@ assert probe(record['filmstrip'], settings['tools'])['width'] == 11520
 assert process(path, access=settings['_access'])['id'] == record['id'], 'Completed jobs should be idempotent'
 still = root / 'testdata/hdrilib/plhn_indoor_abandonedBakery/main/plhn_indoor_abandonedBakery.exr'
 job = make_manifest(settings, library, 'Bakery', 'HDRI', str(still), ['interior'],
-                    'ACES - ACEScg', 'ACES to Rec.709', media, kind='hdri')
+                    'ACES - ACEScg', 'ACES to Rec.709', media, kind='still')
 path = save_manifest(job, test_root / 'jobs')
 record = process(path, access=settings['_access'])
 assert not record.get('filmstrip')

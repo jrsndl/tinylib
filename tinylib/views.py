@@ -2,6 +2,9 @@
 from collections import OrderedDict
 import json
 import math
+import os
+import threading
+import time
 from .qt import QtCore, QtGui, QtWidgets
 from .library import Library
 from .preferences import asset_key
@@ -9,6 +12,7 @@ from .filters import duration
 from .preferences import ASSET_MIME, COLLECTION_MIME
 from .tile_text import DEFAULT_TEMPLATE, render_template, validate_template
 from .path_format import format_assets
+from .thumbnail_cache import cache_root, cached_image_path
 from pathlib import Path
 
 STYLE = '''
@@ -37,48 +41,101 @@ QToolTip { background: #383838; color: #eee; border: 1px solid #777; }
 
 class Loader(QtCore.QThread):
     loaded = QtCore.Signal(object, object)
+    progress = QtCore.Signal(object)
 
-    def __init__(self, configs, parent):
+    def __init__(self, configs, parent, use_index_cache=True):
         super().__init__(parent)
         self.configs = configs
+        self.index_cache_root = parent.cache.disk_root
+        self.use_index_cache = use_index_cache
 
     def run(self):
         assets, errors = [], []
-        for config in self.configs:
+        total = len(self.configs)
+        started = time.perf_counter()
+        for index, config in enumerate(self.configs, 1):
             if self.isInterruptionRequested():
                 return
+            self.progress.emit({'phase': 'reading', 'name': config['name'], 'index': index,
+                                'total': total, 'assets': len(assets),
+                                'seconds': time.perf_counter() - started})
+            before = len(assets)
+            library = None
             try:
-                assets += Library(config['root'], config['name'], config.get('legacy_roots', [])).load()
+                def normalized(current, record_total):
+                    self.progress.emit({'phase': 'normalizing', 'name': config['name'],
+                                        'index': index, 'total': total, 'current': current,
+                                        'record_total': record_total, 'assets': len(assets) + current,
+                                        'seconds': time.perf_counter() - started})
+                library = Library(config['root'], config['name'], config.get('legacy_roots', []),
+                                  index_cache_root=self.index_cache_root)
+                assets += library.load(normalized, use_cache=self.use_index_cache)
             except Exception as error:
                 errors.append(config['name'] + ': ' + str(error))
+            self.progress.emit({'phase': 'read', 'name': config['name'], 'index': index,
+                                'total': total, 'library_assets': len(assets) - before,
+                                'assets': len(assets), 'seconds': time.perf_counter() - started,
+                                'index_cache_hit': bool(library and library.index_cache_hit)})
         self.loaded.emit(assets, errors)
 
 
 class ImageResult(QtCore.QObject):
-    ready = QtCore.Signal(str, object)
+    ready = QtCore.Signal(str, object, bool)
 
 
 class ImageRead(QtCore.QRunnable):
-    def __init__(self, path, signals):
+    def __init__(self, path, signals, disk_root):
         super().__init__()
-        self.path, self.signals = path, signals
+        self.path, self.signals, self.disk_root = path, signals, disk_root
 
     def run(self):
+        cached = None
+        try:
+            cached = cached_image_path(self.disk_root, self.path)
+            if cached.is_file():
+                image = QtGui.QImage(str(cached))
+                if not image.isNull():
+                    self.signals.ready.emit(self.path, image, True)
+                    return
+                cached.unlink()
+        except OSError:
+            cached = None
         image = QtGui.QImage(self.path)
         if image.width() == 11520 and image.height() == 270:
             image = image.scaled(5760, 135, QtCore.Qt.IgnoreAspectRatio, QtCore.Qt.SmoothTransformation)
         elif '/filmstrip/' not in self.path.replace('\\', '/').lower() and image.width() > 640:
             image = image.scaled(640, 360, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
-        self.signals.ready.emit(self.path, image)
+        if cached and not image.isNull():
+            temporary = cached.with_name(cached.name + '.%s.%s.tmp' % (os.getpid(), threading.get_ident()))
+            try:
+                cached.parent.mkdir(parents=True, exist_ok=True)
+                if image.save(str(temporary), 'JPG', 88):
+                    os.replace(temporary, cached)
+            except OSError:
+                pass
+            finally:
+                try:
+                    temporary.unlink()
+                except OSError:
+                    pass
+        self.signals.ready.emit(self.path, image, False)
 
 
 class ImageCache(QtCore.QObject):
     changed = QtCore.Signal()
+    activity = QtCore.Signal(object)
 
-    def __init__(self, parent):
+    def __init__(self, parent=None, disk_root=None):
         super().__init__(parent)
+        self.disk_root = Path(disk_root) if disk_root else cache_root()
         self.images = OrderedDict()
         self.bytes = 0
+        self.disk_hits = 0
+        self.source_loads = 0
+        self.failures = 0
+        self.requested = 0
+        self.completed = 0
+        self.started_at = None
         self.pending = set()
         self.pool = QtCore.QThreadPool(self)
         self.pool.setMaxThreadCount(4)
@@ -92,18 +149,37 @@ class ImageCache(QtCore.QObject):
             self.images.move_to_end(path)
             return self.images[path]
         if path not in self.pending:
+            if self.started_at is None:
+                self.started_at = time.perf_counter()
             self.pending.add(path)
-            self.pool.start(ImageRead(path, self.signals))
+            self.requested += 1
+            self.pool.start(ImageRead(path, self.signals, self.disk_root))
+            self.activity.emit(self.snapshot())
         return QtGui.QPixmap()
 
-    def received(self, path, image):
+    def received(self, path, image, from_disk):
         self.pending.discard(path)
+        self.completed += 1
+        if from_disk:
+            self.disk_hits += 1
+        elif not image.isNull():
+            self.source_loads += 1
+        else:
+            self.failures += 1
         self.images[path] = QtGui.QPixmap.fromImage(image)
         self.bytes += image.width() * image.height() * 4
         while len(self.images) > 160 or self.bytes > 96 * 1024 * 1024:
             _, removed = self.images.popitem(last=False)
             self.bytes -= removed.width() * removed.height() * 4
+        self.activity.emit(self.snapshot())
         self.changed.emit()
+
+    def snapshot(self):
+        seconds = time.perf_counter() - self.started_at if self.started_at is not None else 0.0
+        return {'requested': self.requested, 'completed': self.completed,
+                'pending': len(self.pending), 'disk_hits': self.disk_hits,
+                'source_loads': self.source_loads, 'failures': self.failures,
+                'seconds': seconds, 'root': str(self.disk_root)}
 
 
 class AssetModel(QtCore.QAbstractTableModel):

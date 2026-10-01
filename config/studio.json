@@ -12,6 +12,16 @@
     "Utility - Linear - sRGB",
     "Output - Rec.709"
   ],
+  "extension_groups": {
+    "extensions_stills": ["exr", "bmp", "jpg", "jpeg", "tif", "tiff", "png", "tga", "dpx", "cin", "psd", "tx", "sgi", "heic", "fla", "cr2", "cr3", "dng", "webp"],
+    "extensions_stills_raw": ["cr2", "cr3", "dng", "nef", "nrw", "arw", "srf", "sr2"],
+    "extensions_footage_containers": ["mov", "mp4", "webm", "avi", "qt", "wmv", "mpg", "mxf", "mkv"],
+    "extensions_models": ["abc", "fbx", "obj", "usd", "usda", "usdc", "usdz", "gltf", "glb", "ply", "stl"],
+    "extensions_3dscene": ["3ds", "blend", "c4d", "ma", "max", "mb", "hip", "hipnc", "hiplc"],
+    "extensions_splats": ["ply", "spz", "sog", "splat", "ksplat"],
+    "extensions_materials": ["mtlx", "sbs", "sbsar", "mra"],
+    "extensions_workfiles": ["nk", "aep", "ai", "indd", "kra", "pur", "sni"]
+  },
   "tools": {
     "ffmpeg": "ffmpeg",
     "ffprobe": "ffprobe",

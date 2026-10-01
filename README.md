@@ -1,6 +1,6 @@
 # TinyLib
 
-A studio footage and HDRI browser with DCC action plugins and a Deadline ingest worker.
+A studio asset library with DCC action plugins and a Deadline ingest worker.
 
 ## Try the sample libraries
 
@@ -15,6 +15,16 @@ For a production browser, run `python launch.py` or load it inside Nuke. Python 
 
 Standalone TinyLib uses the studio-style dark Qt template in `tinylib/standalone.qss`. Nuke-hosted TinyLib retains its Nuke-matched stylesheet. Bitmap references from the supplied standalone template are intentionally replaced by Qt's built-in arrows, checks and navigation glyphs, so the controls remain readable without a resource bundle.
 
+## Local thumbnail cache
+
+TinyLib stores downscaled thumbnails, filmstrips and normalized library indexes on the local machine. It first uses `%NUKE_TEMP_DIR%/tinylib`. When `NUKE_TEMP_DIR` is missing, unavailable or not writable, it prefers a machine-shared `Temp` folder and uses the platform's user temp folder only as the final fallback. Hover over the browser status line to see the active cache location.
+
+The cache key includes the source path, file size and modification time. Replacing a library thumbnail therefore creates a fresh cached preview automatically. Library media is never modified.
+
+The normalized index is keyed by the library identity plus `data.json` size and modification time. A changed database rebuilds it automatically. The **Refresh** button explicitly bypasses and rebuilds the index, which is useful after manually changing representation folders without updating `data.json`.
+
+During startup, the bottom status line reports the library currently being read, assets discovered, elapsed time, preview completion, local-cache hits, original-source reads, pending reads and unavailable previews.
+
 Configure a read-only library in `config/performance.local.json` to isolate performance testing from other libraries:
 
 ```powershell
@@ -25,11 +35,15 @@ This dedicated configuration isolates one library. Initial read-only measurement
 
 ## Nuke 15.2 and newer
 
-Add this to the studio `init.py`:
+Add the directory which **contains** the `tinylib` package to the studio `init.py`. For example, if the package is `D:/_code/footage_lib/tinylib/__init__.py`:
 
 ```python
-nuke.pluginAddPath("C:/tools/tinylib")
+nuke.pluginAddPath("D:/_code/footage_lib")
 ```
+
+Do not add `D:/_code/footage_lib/tinylib` itself. Doing that exposes files such as `tinylib/ui.py` as top-level modules and can shadow another plug-in's `ui` module.
+
+No user `menu.py` entry is needed. Nuke loads the bundled `menu.py` from the registered TinyLib directory and creates the command once.
 
 The `TinyLib > Studio library` menu opens the browser. A studio deployment should use the same shared installation path for all users. Set `TINYLIB_CONFIG` centrally to a shared JSON configuration; otherwise the installation's `config/studio.json` is used. Users do not need to enter a library path.
 
@@ -37,9 +51,9 @@ For an immediate test in Nuke's Script Editor:
 
 ```python
 import sys
-sys.path.insert(0, "C:/tools/tinylib")
+sys.path.insert(0, "D:/_code/footage_lib")
 import tinylib
-tinylib.show("C:/tools/tinylib/config/demo.json")
+tinylib.show("D:/_code/footage_lib/config/demo.json")
 ```
 
 The browser uses PySide2 for Nuke 15 and PySide6 for Nuke 16+. Main and highres imports create Read nodes with explicit frame ranges and color space; an unknown project color space is reported instead of silently selecting a different one. Still previews preserve image aspect ratio. Double-click an asset for JPEG/MP4/MOV preview playback; hover footage for a 24-frame filmstrip.
@@ -107,7 +121,9 @@ Changes are drafts until saved; locking again, cancelling or switching assets di
 
 ## Ingest
 
-Choose a writable destination, main category, asset name, tags, main color space and processing profile. Pick an individual image or detect a sequence from one frame. Explicit sequence syntax is `name.####.exr 1001-1100` or `name.%04d.exr 1001-1100`. Missing frames fail validation. A selected file remains a still unless sequence detection is requested. HDRI is an explicit asset type; highres is optional.
+Choose a writable destination and an explicit asset type; Footage is the default. Select an existing main category or enable **Create new** to publish into a new top-level category folder. TinyLib supports Still, Footage, Model, Folder, Splat, PDF and Material assets. A 360 image or clip is a Still or Footage with `is_equirectangular` enabled. See [asset types and metadata](docs/asset-types.md) for every representation, extension group and field.
+
+The complete ingest panel accepts files and folders dropped from the OS. For Footage, selecting a sequence member or its folder detects a contiguous sequence automatically and writes `name.####.exr 1001-1100` into Main. Missing frames and extensions outside the selected type are rejected. TinyLib derives the asset name by removing the extension, sequence counter and `v###` token, then prefills lowercase keywords by splitting separators and CamelCase. Highres is optional where the selected type supports it.
 
 For each required representation, select supplied media or generation:
 
@@ -116,7 +132,7 @@ For each required representation, select supplied media or generation:
 | Main | Original files copied unchanged | Original |
 | Highres | Original files copied unchanged | Original |
 | Proxy, footage | H.264 MP4, Rec.709 | 1920 × 1080 |
-| Proxy, still/HDRI | JPEG, Rec.709 | 1920 × 1080 |
+| Proxy, Still | JPEG, Rec.709 | 1920 × 1080 |
 | Thumbnail | JPEG, Rec.709 | 960 × 506 |
 | Filmstrip, footage only | JPEG, 24 tiles | 11520 × 270 |
 

@@ -16,8 +16,10 @@ def duration(asset):
     if asset.get('kind') != 'footage':
         return 0.0
     metadata = asset.get('metadata', {})
-    fps = number(metadata.get('FPS', asset.get('fps')))
-    frames = number(metadata.get('Frame(s)'))
+    if number(metadata.get('duration_seconds')) not in (None, 0):
+        return number(metadata.get('duration_seconds'))
+    fps = number(metadata.get('frame_rate', metadata.get('FPS', asset.get('fps'))))
+    frames = number(metadata.get('duration_frames', metadata.get('Frame(s)')))
     if frames is None and asset.get('first') is not None and asset.get('last') is not None:
         frames = asset['last'] - asset['first'] + 1
     return frames / fps if frames is not None and fps and fps > 0 else None

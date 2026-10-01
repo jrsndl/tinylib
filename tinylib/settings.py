@@ -2,6 +2,7 @@
 import os
 from pathlib import Path
 from .library import read_json
+from .asset_types import SCHEMA_VERSION, extension_groups
 
 
 def load_settings(path=None):
@@ -20,6 +21,8 @@ def load_settings(path=None):
         return os.path.expandvars(value) if isinstance(value, str) else value
 
     data = expand(data)
+    data['asset_type_schema_version'] = SCHEMA_VERSION
+    data['extension_groups'] = extension_groups(data)
     for library in data.get('libraries', []):
         root = Path(library['root'])
         if not root.is_absolute():

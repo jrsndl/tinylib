@@ -9,9 +9,6 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-IMAGE_EXTENSIONS = {'.exr', '.hdr', '.jpg', '.jpeg', '.png', '.tif', '.tiff', '.dpx'}
-
-
 def read_json(path):
     with open(path, encoding='utf-8-sig') as stream:
         return json.load(stream)
@@ -110,10 +107,12 @@ def safe_component(value):
 
 
 class Library:
-    def __init__(self, root, name=None, legacy_roots=()):
+    def __init__(self, root, name=None, legacy_roots=(), index_cache_root=None):
         self.root = Path(root)
         self.name = name or self.root.name
         self.legacy_roots = [str(p).replace('\\', '/').rstrip('/') for p in legacy_roots]
+        self.index_cache_root = index_cache_root
+        self.index_cache_hit = False
         self.assets = []
 
     def resolve(self, value):
@@ -127,13 +126,29 @@ class Library:
             return value
         return str(self.root / value).replace('\\', '/')
 
-    def load(self):
+    def load(self, progress=None, use_cache=True):
+        self.index_cache_hit = False
         database = self.root / 'data.json'
         if not database.exists():
             if not self.root.is_dir():
                 raise ValueError('Library is unavailable: ' + str(self.root))
             self.assets = self.scan()
             return self.assets
+        cache_path = None
+        if use_cache:
+            try:
+                from .thumbnail_cache import cache_root, cached_library_index_path
+                local_root = self.index_cache_root or cache_root()
+                cache_path = cached_library_index_path(local_root, database, self.root,
+                                                       self.name, self.legacy_roots)
+                if cache_path.is_file():
+                    cached = read_json(cache_path)
+                    if cached.get('index_cache_version') == 1:
+                        self.assets = cached['assets']
+                        self.index_cache_hit = True
+                        return self.assets
+            except (OSError, ValueError, KeyError, TypeError):
+                cache_path = None
         data = read_json(database)
         if data.get('schema_version') == 3:
             records = data['assets']
@@ -154,45 +169,84 @@ class Library:
                         records.append(record)
         else:
             raise ValueError('Unsupported database schema: ' + str(database))
-        self.assets = [self.normalize(r) for r in records]
+        self.assets = []
+        total = len(records)
+        for index, record in enumerate(records, 1):
+            self.assets.append(self.normalize(record))
+            if progress and (index == 1 or index == total or index % 50 == 0):
+                progress(index, total)
+        if cache_path is None:
+            try:
+                from .thumbnail_cache import cache_root, cached_library_index_path
+                local_root = self.index_cache_root or cache_root()
+                cache_path = cached_library_index_path(local_root, database, self.root,
+                                                       self.name, self.legacy_roots)
+            except OSError:
+                cache_path = None
+        if cache_path:
+            try:
+                atomic_json(cache_path, {'index_cache_version': 1, 'assets': self.assets})
+            except OSError:
+                pass
         return self.assets
 
     def normalize(self, record):
+        from .asset_types import canonical_type
         result = copy.deepcopy(record)
-        for key in ('main', 'thumb', 'proxy', 'filmstrip', 'highres'):
+        for key in ('main', 'thumb', 'proxy', 'filmstrip', 'highres', 'scene'):
             result[key] = self.resolve(result.get(key, ''))
-        asset_dir = Path(result['main']).parent.parent
-        for key in ('thumb', 'proxy', 'filmstrip', 'highres'):
-            if not result[key]:
-                folder = asset_dir / key
-                if folder.is_dir():
-                    result[key] = next((str(p).replace('\\', '/') for p in sorted(folder.iterdir()) if p.is_file()), '')
+        asset_dir = Path(result['main']).parent if result.get('kind') == 'folder' else Path(result['main']).parent.parent
+        missing = [key for key in ('thumb', 'proxy', 'filmstrip', 'highres', 'scene') if not result[key]]
+        folders = {}
+        if missing:
+            try:
+                folders = {item.name.casefold(): item for item in asset_dir.iterdir() if item.is_dir()}
+            except OSError:
+                pass
+        for key in missing:
+            folder = folders.get(key)
+            if folder:
+                try:
+                    if result['kind'] == 'folder' and key in ('proxy', 'highres'):
+                        result[key] = str(folder).replace('\\', '/')
+                    else:
+                        result[key] = next((str(p).replace('\\', '/') for p in sorted(folder.iterdir()) if p.is_file()), '')
+                except OSError:
+                    pass
         result.setdefault('tags', [])
+        result.setdefault('kind', 'still')
+        result['kind'] = canonical_type(result['kind'])
         result.setdefault('metadata', {})
         result.setdefault('colorspace', 'ACEScg')
-        result.setdefault('kind', 'still')
         result['library'] = self.name
         result['library_root'] = str(self.root)
         return result
 
     def scan(self):
+        from .asset_types import detect_type
         records = []
-        # Supports category/asset and the supplied flat HDRI library.
+        # Supports category/asset and a one-level flat library.
         folders = list(self.root.glob('*/main')) + list(self.root.glob('*/*/main'))
         for folder in sorted(folders):
             if any(part.startswith('.') for part in folder.relative_to(self.root).parts):
                 continue
-            sources = sorted(p for p in folder.iterdir() if p.suffix.lower() in IMAGE_EXTENSIONS)
+            sources = sorted(p for p in folder.iterdir() if p.is_file())
             if not sources:
                 continue
-            source = detect_sequence(sources[0])
+            try:
+                kind = detect_type(sources[0])
+                source = detect_sequence(sources[0]) if kind == 'still' else str(sources[0])
+                if split_sequence(source)[1] is not None:
+                    kind = detect_type(source, is_sequence=True)
+            except ValueError:
+                continue
             main, first, last = split_sequence(source)
             asset = folder.parent
             relative = asset.relative_to(self.root)
             category = relative.parts[0] if len(relative.parts) > 1 else 'HDRI'
             records.append(self.normalize(dict(id=relative.as_posix(), name=asset.name,
                 category=category, main=main, first=first, last=last,
-                kind='footage' if first is not None else 'still',
+                kind=kind,
                 tags=[t.lower() for t in re.split(r'[_\s-]+', asset.name) if t], metadata={})))
         return records
 
@@ -203,7 +257,7 @@ class Library:
                 result.pop(key)
         for key in ('library', 'library_root'):
             result.pop(key, None)
-        for key in ('main', 'thumb', 'proxy', 'filmstrip', 'highres'):
+        for key in ('main', 'thumb', 'proxy', 'filmstrip', 'highres', 'scene'):
             if result.get(key):
                 try:
                     result[key] = Path(result[key]).relative_to(self.root).as_posix()
@@ -236,7 +290,8 @@ class Library:
                     with open(backup, 'xb') as stream:
                         stream.write(database.read_bytes())
                 document = {}
-            document.update(schema_version=3, assets=[self.portable(asset) for asset in self.assets])
+            document.update(schema_version=3, asset_type_schema_version=1,
+                            assets=[self.portable(asset) for asset in self.assets])
             atomic_json(database, document)
             return current
 
@@ -259,7 +314,7 @@ class Library:
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 Path(staging).rename(destination)
             try:
-                atomic_json(database, {'schema_version': 3,
+                atomic_json(database, {'schema_version': 3, 'asset_type_schema_version': 1,
                     'assets': [self.portable(a) for a in self.assets] + [self.portable(record)]})
             except Exception:
                 if staging:

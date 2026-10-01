@@ -3,6 +3,7 @@ import copy
 import math
 from .access import root_key
 from .library import Library
+from .asset_types import validate_metadata, relative_paths
 
 EDITABLE = {'colorspace', 'tags', 'metadata'}
 
@@ -35,6 +36,11 @@ def validate_changes(asset, changes):
                 raise ValueError(field + ' must be a positive number.')
             if not math.isfinite(value) or value <= 0 or (field != 'FPS' and not value.is_integer()):
                 raise ValueError(field + ' must be a positive ' + ('number.' if field == 'FPS' else 'integer.'))
+    validate_metadata(merged.get('kind', 'still'), metadata)
+    if merged.get('kind') == 'model' and 'textures' in metadata:
+        relative_paths(metadata['textures'])
+    if merged.get('kind') == 'folder' and 'files' in metadata:
+        relative_paths(metadata['files'])
     if merged.get('kind') == 'footage':
         first, last = merged.get('first'), merged.get('last')
         if type(first) is not int or type(last) is not int or first > last:

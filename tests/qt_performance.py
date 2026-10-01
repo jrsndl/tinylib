@@ -89,6 +89,11 @@ while time.perf_counter() - start < 2:
     previous = current
     QtCore.QThread.msleep(5)
 result['play_all_warm_max_event_loop_gap_ms'] = round(max(delays) * 1000, 2)
+result['thumbnail_disk_cache_hits'] = window.cache.disk_hits
+result['thumbnail_source_loads'] = window.cache.source_loads
+result['thumbnail_cache_root'] = str(window.cache.disk_root)
+result['startup_status'] = window.status.text()
+assert 'previews' in result['startup_status'].lower()
 window.play_button.setChecked(False)
 window.cache.pool.waitForDone()
 app.processEvents()

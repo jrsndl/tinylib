@@ -2,25 +2,38 @@
 import json
 from pathlib import Path
 from .qt import QtCore, QtWidgets
-from .ingest import make_manifest, save_manifest, submit_deadline
-from .library import detect_sequence
+from .ingest import (clean_asset_name, keywords_from_name, make_manifest,
+                     prepare_source, save_manifest, submit_deadline)
+from .asset_types import ASSET_TYPES, default_metadata
 
 
 class PathField(QtWidgets.QWidget):
+    selected = QtCore.Signal(str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QtWidgets.QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.edit = QtWidgets.QLineEdit()
-        button = QtWidgets.QPushButton('Browse…')
+        button = QtWidgets.QPushButton('File…')
+        folder_button = QtWidgets.QPushButton('Folder…')
         layout.addWidget(self.edit, 1)
         layout.addWidget(button)
+        layout.addWidget(folder_button)
         button.clicked.connect(self.browse)
+        folder_button.clicked.connect(self.browse_folder)
 
     def browse(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, 'Choose media')
         if path:
             self.edit.setText(path)
+            self.selected.emit(path)
+
+    def browse_folder(self):
+        path = QtWidgets.QFileDialog.getExistingDirectory(self, 'Choose folder')
+        if path:
+            self.edit.setText(path)
+            self.selected.emit(path)
 
     def text(self):
         return self.edit.text().strip()
@@ -45,6 +58,7 @@ class IngestDialog(QtWidgets.QDialog):
     def __init__(self, settings, assets, parent=None):
         super().__init__(parent)
         self.settings, self.assets = settings, assets
+        self.setAcceptDrops(True)
         self.setWindowTitle('Ingest asset')
         self.resize(760, 800)
         layout = QtWidgets.QVBoxLayout(self)
@@ -63,23 +77,40 @@ class IngestDialog(QtWidgets.QDialog):
             if not library.get('read_only') and (not access or (access.can(library['root'], 'view') and access.can(library['root'], 'ingest'))):
                 self.library.addItem(library['name'], library)
         form.addRow('Destination library', self.library)
-        self.name = QtWidgets.QLineEdit()
-        form.addRow('Asset name', self.name)
+
+        self.kind = QtWidgets.QComboBox()
+        for identifier, definition in ASSET_TYPES.items():
+            self.kind.addItem(definition['label'], identifier)
+        self.kind.setCurrentIndex(self.kind.findData('footage'))
+        form.addRow('Asset type', self.kind)
+
         self.category = QtWidgets.QComboBox()
-        self.category.setEditable(True)
-        self.category.addItems(sorted({a['category'] for a in assets}))
-        form.addRow('Main category', self.category)
+        self.new_category = QtWidgets.QCheckBox('Create new')
+        self.new_category_name = QtWidgets.QLineEdit('foo')
+        self.new_category_name.setEnabled(False)
+        category_widget = QtWidgets.QWidget()
+        category_row = QtWidgets.QHBoxLayout(category_widget)
+        category_row.setContentsMargins(0, 0, 0, 0)
+        category_row.addWidget(self.category, 1)
+        category_row.addWidget(self.new_category)
+        category_row.addWidget(self.new_category_name, 1)
+        form.addRow('Main category', category_widget)
+        self.new_category.toggled.connect(self.toggle_new_category)
+        self.library.currentIndexChanged.connect(self.refresh_categories)
+        self.refresh_categories()
+
         self.source = PathField()
-        form.addRow('Main image / sequence', self.source)
-        detect = QtWidgets.QPushButton('Detect sequence from selected frame')
-        detect.clicked.connect(self.detect)
-        form.addRow('', detect)
-        hint = QtWidgets.QLabel('Sequence syntax: name.####.exr 1001-1100   ·   A single file stays a still.')
+        self.source.edit.setAcceptDrops(False)
+        self.source.selected.connect(self.source_selected)
+        form.addRow('Main', self.source)
+        hint = QtWidgets.QLabel('Choose a still, sequence frame, footage container, asset file, or folder. '
+                                'Footage image sequences are detected automatically.')
         hint.setWordWrap(True)
         form.addRow('', hint)
-        self.kind = QtWidgets.QComboBox()
-        self.kind.addItems(['auto', 'still', 'hdri', 'footage'])
-        form.addRow('Asset type', self.kind)
+
+        self.name = QtWidgets.QLineEdit()
+        form.addRow('Asset name', self.name)
+        self.source.edit.editingFinished.connect(lambda: self.source_selected(self.source.text()))
         self.fps = QtWidgets.QDoubleSpinBox()
         self.fps.setRange(.001, 240)
         self.fps.setDecimals(3)
@@ -106,12 +137,13 @@ class IngestDialog(QtWidgets.QDialog):
         self.preview_source.addItems(['main', 'proxy'])
         form.addRow('Generate thumb / strip from', self.preview_source)
         self.media = {}
-        for key, label in [('proxy', 'Proxy · 1920 × 1080'), ('thumb', 'Thumbnail · 960 × 506'), ('filmstrip', 'Filmstrip · 24 × 480 × 270')]:
+        for key, label in [('proxy', 'Proxy'), ('thumb', 'Thumbnail · 960 × 506'),
+                           ('filmstrip', 'Filmstrip · 24 × 480 × 270'), ('scene', 'Scene')]:
             field = QtWidgets.QWidget()
             row = QtWidgets.QVBoxLayout(field)
             row.setContentsMargins(0, 0, 0, 0)
             mode = QtWidgets.QComboBox()
-            mode.addItems(['generate', 'supply'])
+            mode.addItems(['omit', 'generate', 'supply'])
             path = PathField()
             path.setEnabled(False)
             mode.currentTextChanged.connect(lambda text, widget=path: widget.setEnabled(text == 'supply'))
@@ -119,7 +151,12 @@ class IngestDialog(QtWidgets.QDialog):
             row.addWidget(path)
             form.addRow(label, field)
             self.media[key] = mode, path
-        note = QtWidgets.QLabel('Filmstrips are omitted for stills/HDRIs. Supplied previews must already be Rec.709. '
+        self.metadata = QtWidgets.QPlainTextEdit()
+        self.metadata.setMaximumHeight(180)
+        form.addRow('Type metadata (JSON)', self.metadata)
+        self.kind.currentIndexChanged.connect(lambda: self.update_type(self.kind.currentData()))
+        self.update_type(self.kind.currentData())
+        note = QtWidgets.QLabel('Generated previews are available for Still and Footage. Other asset types require a supplied JPG thumbnail. '
                               'Main and highres files are copied without changing their pixels.')
         note.setWordWrap(True)
         form.addRow('', note)
@@ -137,15 +174,77 @@ class IngestDialog(QtWidgets.QDialog):
         for button in (self.review_button, self.export_button, self.submit_button):
             buttons.addWidget(button)
         layout.addLayout(buttons)
+        # Route OS path drops from every part of the panel to the dialog.
+        for child in self.findChildren(QtWidgets.QWidget):
+            child.setAcceptDrops(False)
+        self.setAcceptDrops(True)
         if not self.library.count():
             self.status.setText('No writable library is configured. Add one to the studio configuration.')
             self.submit_button.setEnabled(False)
 
-    def detect(self):
+    def update_type(self, kind):
+        definition = ASSET_TYPES[kind]
+        roles = definition['representations']
+        visual = kind in ('still', 'footage')
+        for role, (mode, path) in self.media.items():
+            supported = role in roles
+            mode.parentWidget().setVisible(supported)
+            if supported:
+                required = roles[role][0]
+                preferred = 'generate' if visual and (required or role in ('proxy', 'filmstrip')) else ('supply' if required else 'omit')
+                mode.setCurrentText(preferred)
+                path.setEnabled(preferred == 'supply')
+        self.fps.setEnabled(kind == 'footage')
+        self.color.setEnabled(visual)
+        self.metadata.setPlainText(json.dumps(default_metadata(kind), indent=2))
+        if self.source.text():
+            self.source_selected(self.source.text())
+
+    def refresh_categories(self, *_):
+        library = self.library.currentData()
+        root = str(Path(library['root']).resolve()).casefold() if library else ''
+        categories = {asset['category'].replace('\\', '/').split('/')[0] for asset in self.assets
+                      if str(Path(asset.get('library_root', '')).resolve()).casefold() == root}
+        if library:
+            library_root = Path(library['root'])
+            if library_root.is_dir():
+                categories.update(item.name for item in library_root.iterdir()
+                                  if item.is_dir() and not item.name.startswith('.'))
+        current = self.category.currentText()
+        self.category.clear()
+        self.category.addItems(sorted(categories, key=str.casefold))
+        if current and self.category.findText(current) >= 0:
+            self.category.setCurrentText(current)
+
+    def toggle_new_category(self, checked):
+        self.category.setEnabled(not checked)
+        self.new_category_name.setEnabled(checked)
+
+    def selected_category(self):
+        return self.new_category_name.text().strip() if self.new_category.isChecked() else self.category.currentText().strip()
+
+    def source_selected(self, value):
+        if not value:
+            return
         try:
-            self.source.edit.setText(detect_sequence(self.source.text()))
+            source = prepare_source(value, self.kind.currentData(), self.settings)
+            self.source.edit.setText(source)
+            clean = clean_asset_name(source)
+            self.name.setText(clean)
+            self.tags.setText(', '.join(keywords_from_name(clean)))
+            self.status.setText('Main source is valid for %s.' % ASSET_TYPES[self.kind.currentData()]['label'])
         except Exception as error:
             self.error(str(error))
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls() and any(url.isLocalFile() for url in event.mimeData().urls()):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        paths = [url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()]
+        if paths:
+            self.source_selected(paths[0])
+            event.acceptProposedAction()
 
     def add_tag(self, index):
         if index:
@@ -158,11 +257,15 @@ class IngestDialog(QtWidgets.QDialog):
     def manifest(self):
         if self.library.currentData() is None:
             raise ValueError('No writable library is configured.')
+        try:
+            metadata = json.loads(self.metadata.toPlainText() or '{}')
+        except ValueError as error:
+            raise ValueError('Type metadata is invalid JSON: ' + str(error))
         return make_manifest(self.settings, self.library.currentData(), self.name.text(),
-            self.category.currentText(), self.source.text(), self.tags.text().split(','),
+            self.selected_category(), self.source.text(), self.tags.text().split(','),
             self.color.currentText(), self.profile.currentText(),
             {k: {'mode': mode.currentText(), 'path': path.text()} for k, (mode, path) in self.media.items()},
-            self.fps.value(), self.highres.text(), self.preview_source.currentText(), self.kind.currentText())
+            self.fps.value(), self.highres.text(), self.preview_source.currentText(), self.kind.currentData(), metadata)
 
     def error(self, message):
         self.status.setText(message)
