@@ -9,7 +9,7 @@ cd C:\tools\tinylib
 python launch.py --demo
 ```
 
-The demo reads `testdata/demolib/data.json`, remaps its old legacy absolute paths, and discovers the three flat HDRI asset folders. It does not rewrite the sample database. Some database entries have no corresponding sample files and show “Preview unavailable”. Both demo libraries are read-only.
+The demo reads `testdata/demolib/tinylib_data.json`, remaps its old legacy absolute paths, and discovers the three flat HDRI asset folders. It does not rewrite the sample database. Some database entries have no corresponding sample files and show “Preview unavailable”. Both demo libraries are read-only.
 
 For a production browser, run `python launch.py` or load it inside Nuke. Python 3.9+ and the matching PySide binding are required; Nuke supplies its own Qt runtime.
 
@@ -21,7 +21,7 @@ TinyLib stores downscaled thumbnails, filmstrips and normalized library indexes 
 
 The cache key includes the source path, file size and modification time. Replacing a library thumbnail therefore creates a fresh cached preview automatically. Library media is never modified.
 
-The normalized index is keyed by the library identity plus `data.json` size and modification time. A changed database rebuilds it automatically. The **Refresh** button explicitly bypasses and rebuilds the index, which is useful after manually changing representation folders without updating `data.json`.
+The normalized index is keyed by the library identity plus `tinylib_data.json` size and modification time. A changed database rebuilds it automatically. The **Refresh** button explicitly bypasses and rebuilds the index, which is useful after manually changing representation folders without updating `tinylib_data.json`.
 
 During startup, the bottom status line reports the library currently being read, assets discovered, elapsed time, preview completion, local-cache hits, original-source reads, pending reads and unavailable previews.
 
@@ -80,6 +80,10 @@ The previous external player remains available with `"player_backend": "ffplay"`
 
 TinyLib uses the current Windows login without a password prompt. The first user receives all four default groups. Admin and user group assignments, plus per-library visibility, ingest and action grants, are stored in the studio configuration. Admins edit these through **Access rights…**. Unknown users have no access until assigned.
 
+Administrators also have **Library tools** beneath the library/category tree. **Library crosscheck…** checks every path listed in the selected library's `tinylib_data.json`, including sequence frames and relative texture/file lists, then scans each `library/category/asset` folder for assets absent from JSON. A progress dialog shows the active record or path. The completed report is saved in the Windows Downloads folder as `<library name>_ccrosscheck_<datetime>.log`.
+
+**Rescan Metadata…** scans the selected assets, or the entire selected library when no assets are selected. Image files and sequences use the configured `oiiotool`; container footage uses `ffprobe`. Only `FPS`, `width` and `height` are compared with or offered for storage in `tinylib_data.json`. Every successful probe also writes the complete raw and normalized tool result beside the main source as `<clean name>_meta.json`; sequence counters and their preceding separator are removed from the clean name. The result view lists discrepancies, sidecars and probe errors. **Write metadata** is offered only when the three database fields differ. Confirmed changes are grouped into one atomic database update per library, protected by the same `lock.<windows-user>.txt` ownership and override workflow as Edit/Write.
+
 Studio-wide Python actions are discovered from `action_roots`. Each action has a manifest, configuration JSON, Python entrypoint, and optional PNG icon. The bottom properties dropdown runs an action on the main selection; the collection dropdown runs it on the entire collection. Bundled actions import main/highres into Nuke and copy paths. See [actions and access setup](docs/actions-and-access.md) for the configuration schema, plugin contract and farm-account setup.
 
 ## Search and libraries
@@ -115,9 +119,9 @@ Configure studio library roots and optional legacy path mappings in the studio c
 
 ## Asset properties
 
-The right panel shows descriptive fields without media file paths. Double-click its thumbnail to open the player. **Edit properties** has a padlock and starts locked. Compact read-only identity fields appear first: name, library, category, type and a footage **Range** such as `1001-1100`. With one asset selected in a writable library, admins and users with that library's ingest permission can unlock color space, keywords and metadata, then **Save** or **Cancel**. Personal star ratings remain in the main toolbar and tiles; they are not presented as an asset property.
+The right panel shows descriptive fields without media file paths. Double-click its thumbnail to open the player. Compact read-only identity fields appear first: name, library, category, type and a footage **Range** such as `1001-1100`. With one asset selected in a writable library, admins and users with that library's ingest permission can click the top **Edit** button to edit color space, keywords and metadata. The button becomes a red **Write** button. **Write** commits the draft and leaves edit mode; **Cancel edit** discards it. Selecting another asset commits the current draft automatically and keeps edit mode active. Selections within one library retain the same lock, and unchanged selection jumps perform no disk writes. Moving to another library switches to that library's lock. If validation or writing fails, TinyLib restores the edited selection and keeps its draft. Personal star ratings remain in the main toolbar and tiles; they are not presented as an asset property.
 
-Changes are drafts until saved; locking again, cancelling or switching assets discards the draft. Saving rechecks permission, locks and rereads the database, and rejects conflicting edits to the same fields. Existing unknown database fields are preserved, and failed writes leave the database intact. Read-only libraries remain protected even for admins.
+Entering write mode creates `lock.<windows-user>.txt` beside the library's `tinylib_data.json`. The file records the Windows identity and lock time. Other users see who owns the lock and cannot edit or publish an ingest to that library. Administrators can explicitly override a stale lock. **Write** rechecks permission, writes the database atomically, and then removes the lock; cancellation and normal app closure also remove the current session's lock. A failed validation or database write keeps the draft and lock so the user can correct or cancel it. Existing unknown database fields are preserved, and read-only libraries remain protected even for admins.
 
 ## Ingest
 

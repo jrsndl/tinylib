@@ -17,7 +17,7 @@ class LibraryTests(unittest.TestCase):
         self.root = Path(self.temp.name)
 
     def test_legacy_paths_tags_and_media_roles(self):
-        atomic_json(self.root / 'data.json', {'data': {'elements': {'root|fire': [{
+        atomic_json(self.root / 'tinylib_data.json', {'data': {'elements': {'root|fire': [{
             'source': 'X:/legacy-assets/fire/Test/main/Test.####.exr 1001-1002',
             'proxy': 'X:/legacy-assets/fire/Test/thumb/Test.jpg', 'tags': ['smoke', 'Day']}]}}})
         library = Library(self.root, 'Demo', ['X:/legacy-assets'])
@@ -52,7 +52,7 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(asset['kind'], 'still')
         self.assertEqual(asset['category'], 'HDRI')
         self.assertTrue(asset['highres'].endswith('highres/indoor.exr'))
-        self.assertFalse((self.root / 'data.json').exists())
+        self.assertFalse((self.root / 'tinylib_data.json').exists())
 
     def test_scan_excludes_pending_ingests(self):
         main = self.root / '.tinylib-staging/job/main'
@@ -61,7 +61,7 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(Library(self.root).load(), [])
 
     def test_publish_staging_and_backup(self):
-        atomic_json(self.root / 'data.json', {'data': {}})
+        atomic_json(self.root / 'tinylib_data.json', {'data': {}})
         stage = self.root / '.tinylib-staging/job'
         stage.mkdir(parents=True)
         record = dict(id='fire/Test', category='fire', name='Test', main=str(self.root / 'fire/Test/main/a.exr'))
@@ -70,13 +70,13 @@ class LibraryTests(unittest.TestCase):
         self.assertTrue((self.root / 'fire/Test').exists())
         self.assertFalse(stage.exists())
         self.assertTrue((self.root / 'data.legacy.backup.json').exists())
-        database = json.loads((self.root / 'data.json').read_text())
+        database = json.loads((self.root / 'tinylib_data.json').read_text())
         self.assertEqual(database['assets'][0]['main'], 'fire/Test/main/a.exr')
         with self.assertRaises(ValueError):
             library.publish(record)
 
     def test_publish_rolls_back_on_database_error(self):
-        atomic_json(self.root / 'data.json', {'schema_version': 3, 'assets': []})
+        atomic_json(self.root / 'tinylib_data.json', {'schema_version': 3, 'assets': []})
         stage = self.root / '.tinylib-staging/job'
         stage.mkdir(parents=True)
         record = dict(id='fire/Test', category='fire', name='Test')
@@ -105,7 +105,7 @@ class LibraryTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 process(path, access=AccessControl({'_config_path': str(self.root / 'studio.json')}, identity='test', persist=False))
         self.assertFalse((self.root / 'still/Asset').exists())
-        self.assertFalse((self.root / 'data.json').exists())
+        self.assertFalse((self.root / 'tinylib_data.json').exists())
         self.assertEqual(json.loads(path.with_suffix('.status.json').read_text())['state'], 'failed')
 
     def test_deadline_job_and_safe_arguments(self):

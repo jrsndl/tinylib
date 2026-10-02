@@ -48,9 +48,9 @@ def validate_changes(asset, changes):
     return changes
 
 
-def save_asset(settings, access, original, changes):
+def save_asset(settings, access, original, changes, edit_token=None):
     access.refresh()
     library = writable_library(settings, access, original)
     validate_changes(original, changes)
     database = Library(library['root'], library['name'], library.get('legacy_roots', []))
-    return database.update_asset(original, changes)
+    return database.update_asset(original, changes, edit_token=edit_token)

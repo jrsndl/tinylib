@@ -20,7 +20,7 @@ class AssetEditTests(unittest.TestCase):
         self.record = {'id': 'fire/test', 'name': 'Test', 'category': 'fire', 'kind': 'footage', 'tags': ['fire'],
                        'main': 'fire/test/main/test.####.exr', 'first': 1001, 'last': 1100,
                        'colorspace': 'ACEScg', 'metadata': {'width': 1920, 'height': 1080, 'FPS': 24}}
-        atomic_json(self.root / 'data.json', {'schema_version': 3, 'studio_extra': True, 'assets': [self.record]})
+        atomic_json(self.root / 'tinylib_data.json', {'schema_version': 3, 'studio_extra': True, 'assets': [self.record]})
         self.library = Library(self.root, 'Test')
         self.asset = self.library.load()[0]
 
@@ -29,8 +29,8 @@ class AssetEditTests(unittest.TestCase):
         self.assertEqual(saved['colorspace'], 'ACES2065-1')
         for field in ('main', 'id', 'kind', 'library_root'):
             self.assertEqual(saved[field], self.asset[field])
-        self.assertTrue(read_json(self.root / 'data.json')['studio_extra'])
-        self.assertEqual(read_json(self.root / 'data.json')['assets'][0]['main'], self.record['main'])
+        self.assertTrue(read_json(self.root / 'tinylib_data.json')['studio_extra'])
+        self.assertEqual(read_json(self.root / 'tinylib_data.json')['assets'][0]['main'], self.record['main'])
 
     def test_stale_same_field_rejected_other_field_preserved(self):
         save_asset(self.config, self.access, self.asset, {'tags': ['new']})
@@ -40,7 +40,7 @@ class AssetEditTests(unittest.TestCase):
         self.assertEqual(saved['tags'], ['new'])
 
     def test_readonly_denied_and_immutable_fields_rejected(self):
-        before = (self.root / 'data.json').read_bytes()
+        before = (self.root / 'tinylib_data.json').read_bytes()
         self.config['libraries'][0]['read_only'] = True
         with self.assertRaises(PermissionError):
             save_asset(self.config, self.access, self.asset, {'colorspace': 'No'})
@@ -52,22 +52,22 @@ class AssetEditTests(unittest.TestCase):
         for field in ('name', 'category', 'first', 'last', 'main', 'kind', 'library', 'id'):
             with self.assertRaises(ValueError):
                 save_asset(self.config, self.access, self.asset, {field: 'No'})
-        self.assertEqual((self.root / 'data.json').read_bytes(), before)
+        self.assertEqual((self.root / 'tinylib_data.json').read_bytes(), before)
 
     def test_invalid_fields_and_failed_write_leave_database_unchanged(self):
-        before = (self.root / 'data.json').read_bytes()
+        before = (self.root / 'tinylib_data.json').read_bytes()
         for change in ({'colorspace': ''}, {'metadata': {'width': -1}}, {'tags': 'text'}):
             with self.assertRaises(ValueError):
                 save_asset(self.config, self.access, self.asset, change)
         with patch('tinylib.library.atomic_json', side_effect=OSError('disk full')):
             with self.assertRaises(OSError):
                 save_asset(self.config, self.access, self.asset, {'colorspace': 'Failed'})
-        self.assertEqual((self.root / 'data.json').read_bytes(), before)
+        self.assertEqual((self.root / 'tinylib_data.json').read_bytes(), before)
 
     def test_legacy_edit_keeps_backup(self):
         legacy = {'data': {'elements': {'root|fire': [{'source': str(self.root / 'fire/Test/main/Test.####.exr') + ' 1-10', 'tags': []}]}}}
-        atomic_json(self.root / 'data.json', legacy)
-        before = (self.root / 'data.json').read_bytes()
+        atomic_json(self.root / 'tinylib_data.json', legacy)
+        before = (self.root / 'tinylib_data.json').read_bytes()
         asset = self.library.load()[0]
         save_asset(self.config, self.access, asset, {'tags': ['new']})
         self.assertEqual((self.root / 'data.legacy.backup.json').read_bytes(), before)

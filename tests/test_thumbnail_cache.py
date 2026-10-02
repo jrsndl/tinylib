@@ -41,7 +41,7 @@ class ThumbnailCachePathTests(unittest.TestCase):
     def test_normalized_library_index_is_reused_and_invalidated(self):
         library_root = self.root / 'library'
         library_root.mkdir()
-        database = library_root / 'data.json'
+        database = library_root / 'tinylib_data.json'
         record = {'id': 'cat/One', 'name': 'One', 'category': 'cat',
                   'main': 'cat/One/main/One.exr', 'thumb': 'cat/One/thumb/One.jpg',
                   'kind': 'still'}

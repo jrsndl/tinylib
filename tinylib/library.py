@@ -9,6 +9,8 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+DATABASE_FILENAME = 'tinylib_data.json'
+
 def read_json(path):
     with open(path, encoding='utf-8-sig') as stream:
         return json.load(stream)
@@ -128,7 +130,7 @@ class Library:
 
     def load(self, progress=None, use_cache=True):
         self.index_cache_hit = False
-        database = self.root / 'data.json'
+        database = self.root / DATABASE_FILENAME
         if not database.exists():
             if not self.root.is_dir():
                 raise ValueError('Library is unavailable: ' + str(self.root))
@@ -265,24 +267,38 @@ class Library:
                     pass
         return result
 
-    def update_asset(self, original, changes):
+    def update_asset(self, original, changes, edit_token=None):
         """Patch changed metadata under lock; reject stale writes to the same field."""
+        return self.update_assets([(original, changes)], edit_token=edit_token)[0]
+
+    def update_assets(self, edits, edit_token=None):
+        """Apply multiple optimistic patches in one locked, atomic database write."""
         from .asset_edit import validate_changes
-        validate_changes(original, changes)
+        for original, changes in edits:
+            validate_changes(original, changes)
         with library_lock(self.root):
-            self.load()
-            matches = [asset for asset in self.assets if asset['id'] == original['id'] and asset['main'] == original['main']]
-            if len(matches) != 1:
-                raise ValueError('Asset changed or disappeared. Refresh the library before editing.')
-            current = matches[0]
-            for field in changes:
-                if current.get(field) != original.get(field):
-                    raise ValueError('Another user changed %s. Refresh before saving.' % field)
-            if not changes:
-                return current
-            current.update(copy.deepcopy(changes))
-            validate_changes(current, {})
-            database = self.root / 'data.json'
+            from .edit_lock import assert_edit_write_allowed
+            assert_edit_write_allowed(self.root, edit_token)
+            self.load(use_cache=False)
+            updated = []
+            changed = False
+            for original, changes in edits:
+                matches = [asset for asset in self.assets
+                           if asset['id'] == original['id'] and asset['main'] == original['main']]
+                if len(matches) != 1:
+                    raise ValueError('Asset changed or disappeared. Refresh the library before editing.')
+                current = matches[0]
+                for field in changes:
+                    if current.get(field) != original.get(field):
+                        raise ValueError('Another user changed %s. Refresh before saving.' % field)
+                if changes:
+                    current.update(copy.deepcopy(changes))
+                    validate_changes(current, {})
+                    changed = True
+                updated.append(current)
+            if not changed:
+                return updated
+            database = self.root / DATABASE_FILENAME
             document = read_json(database) if database.exists() else {}
             if document and document.get('schema_version') != 3:
                 backup = self.root / 'data.legacy.backup.json'
@@ -293,15 +309,17 @@ class Library:
             document.update(schema_version=3, asset_type_schema_version=1,
                             assets=[self.portable(asset) for asset in self.assets])
             atomic_json(database, document)
-            return current
+            return updated
 
-    def publish(self, record, staging=None):
+    def publish(self, record, staging=None, edit_token=None):
         """Reread under lock, preserve legacy DB backup, publish completed assets only."""
         with library_lock(self.root):
+            from .edit_lock import assert_edit_write_allowed
+            assert_edit_write_allowed(self.root, edit_token)
             self.load()
             if any(a['id'] == record['id'] for a in self.assets):
                 raise ValueError('Asset already exists in database: ' + record['id'])
-            database = self.root / 'data.json'
+            database = self.root / DATABASE_FILENAME
             if database.exists() and read_json(database).get('schema_version') != 3:
                 backup = self.root / 'data.legacy.backup.json'
                 if not backup.exists():

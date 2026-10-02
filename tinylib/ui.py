@@ -8,8 +8,9 @@ from .settings import load_settings
 from .preferences import Preferences, asset_key, COLLECTION_MIME
 from .filters import accepts
 from .collection_ui import CollectionsPanel
-from .views import STYLE, Loader, ImageCache, AssetModel, Grid, DetailsView
-from .access import AccessControl
+from .views import (STYLE, Loader, ImageCache, AssetModel, Grid, DetailsView,
+                    heading_font, interface_font)
+from .access import AccessControl, root_key
 from .access_ui import AccessDialog
 from .actions import ActionRegistry
 from .action_ui import ActionPicker
@@ -17,8 +18,12 @@ from .player import Player
 from .tile_text import DEFAULT_TEMPLATE, TOKENS, validate_template
 from .properties_ui import PropertiesEditor
 from .asset_edit import writable_library, save_asset
+from .edit_lock import (LibraryEditLocked, acquire_edit_lock, locked_message,
+                        release_edit_lock)
 from .path_format import FORMATS, format_assets
 from .asset_types import ASSET_TYPES
+from .library import Library
+from .library_tools_ui import CrosscheckDialog, MetadataRescanDialog
 
 
 class StarButton(QtWidgets.QPushButton):
@@ -90,10 +95,14 @@ class Browser(QtWidgets.QWidget):
         self.player.rating_requested.connect(self.rate_asset)
         self.preferences = Preferences(preferences_path)
         self.assets, self.errors = [], []
+        self.edit_mode = False
+        self.edit_session = None
+        self._restoring_edit_selection = False
         self.selection_source = 'main'
         self._filtering = False
         self.setWindowTitle('TinyLib · Studio library')
         self.resize(1580, 900)
+        self.setFont(interface_font())
         stylesheet = STYLE if HOSTED_IN_NUKE else (Path(__file__).with_name('standalone.qss').read_text(encoding='utf-8'))
         self.setStyleSheet(stylesheet)
         layout = QtWidgets.QVBoxLayout(self)
@@ -101,6 +110,7 @@ class Browser(QtWidgets.QWidget):
         top = QtWidgets.QHBoxLayout()
         heading = QtWidgets.QLabel('TinyLib  /  Studio library')
         heading.setObjectName('heading')
+        heading.setFont(heading_font())
         top.addWidget(heading)
         top.addStretch()
         self.identity_label = QtWidgets.QLabel(self.access.identity)
@@ -116,6 +126,11 @@ class Browser(QtWidgets.QWidget):
         self.refresh = QtWidgets.QPushButton('Refresh')
         self.refresh.clicked.connect(lambda: self.reload(False))
         top.addWidget(self.refresh)
+        self.edit_button = QtWidgets.QPushButton('Edit')
+        self.edit_button.setCheckable(True)
+        self.edit_button.setEnabled(False)
+        self.edit_button.clicked.connect(self.toggle_edit)
+        top.addWidget(self.edit_button)
         self.ingest_button = QtWidgets.QPushButton('+ Ingest asset')
         self.ingest_button.setObjectName('primary')
         self.ingest_button.clicked.connect(self.ingest)
@@ -123,10 +138,25 @@ class Browser(QtWidgets.QWidget):
         layout.addLayout(top)
         self.make_filters(layout)
         self.splitter = QtWidgets.QSplitter()
+        library_panel = QtWidgets.QWidget()
+        library_layout = QtWidgets.QVBoxLayout(library_panel)
+        library_layout.setContentsMargins(0, 0, 0, 0)
         self.categories = QtWidgets.QTreeWidget()
         self.categories.setHeaderLabel('LIBRARIES / CATEGORIES')
         self.categories.setMinimumWidth(170)
-        self.splitter.addWidget(self.categories)
+        library_layout.addWidget(self.categories, 1)
+        self.library_tools_button = QtWidgets.QToolButton()
+        self.library_tools_button.setText('Library tools')
+        self.library_tools_button.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        tools_menu = QtWidgets.QMenu(self.library_tools_button)
+        crosscheck_action = tools_menu.addAction('Library crosscheck…')
+        crosscheck_action.triggered.connect(self.library_crosscheck)
+        rescan_action = tools_menu.addAction('Rescan Metadata…')
+        rescan_action.triggered.connect(self.rescan_metadata)
+        self.library_tools_button.setMenu(tools_menu)
+        self.library_tools_button.setVisible(self.access.is_admin)
+        library_layout.addWidget(self.library_tools_button)
+        self.splitter.addWidget(library_panel)
         main = QtWidgets.QWidget()
         main_layout = QtWidgets.QVBoxLayout(main)
         main_layout.setContentsMargins(0, 0, 0, 0)
@@ -317,12 +347,13 @@ class Browser(QtWidgets.QWidget):
         self.detail_title.setMinimumWidth(0)
         self.detail_title.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
         self.detail_title.setObjectName('heading')
+        self.detail_title.setFont(heading_font())
         details.addWidget(self.detail_title)
         self.detail_text = QtWidgets.QPlainTextEdit()
         self.detail_text.setReadOnly(True)
         details.addWidget(self.detail_text, 1)
         self.properties = PropertiesEditor()
-        self.properties.save_requested.connect(self.save_properties)
+        self.properties.cancel_requested.connect(self.cancel_edit)
         self.properties.hide()
         details.addWidget(self.properties, 1)
         self.preview_button = QtWidgets.QPushButton('Open preview')
@@ -370,6 +401,7 @@ class Browser(QtWidgets.QWidget):
         self.registry.reload()
         self.ingest_button.setEnabled(any(not library.get('read_only') and self.access.can(library['root'], 'ingest') for library in configs))
         self.access_button.setVisible(self.access.is_admin)
+        self.library_tools_button.setVisible(self.access.is_admin)
         self.loader = Loader(configs, self, use_index_cache=use_index_cache)
         self.loader.progress.connect(self.library_progress)
         self.loader.loaded.connect(self.loaded)
@@ -574,7 +606,21 @@ class Browser(QtWidgets.QWidget):
         self.selection()
 
     def selection(self, *_):
+        if self._restoring_edit_selection:
+            return
         assets = self.selected_assets()
+        if self.edit_mode and self.edit_session:
+            original_key = asset_key(self.edit_session['original'])
+            same_asset = len(assets) == 1 and asset_key(assets[0]) == original_key
+            if not same_asset:
+                next_asset = assets[0] if len(assets) == 1 else None
+                if not self.write_edit(selection_change=True, next_asset=next_asset,
+                                       next_source=self.selection_source):
+                    self._restore_edit_selection()
+                    return
+                assets = self.selected_assets()
+        if self.edit_mode and not self.edit_session and len(assets) == 1:
+            self._activate_edit_asset(assets[0], self.selection_source)
         asset = assets[0] if assets else None
         for button in (self.preview_button, self.clear_stars, *self.star_buttons):
             button.setEnabled(bool(asset))
@@ -590,7 +636,10 @@ class Browser(QtWidgets.QWidget):
                 editable = True
             except PermissionError:
                 pass
-        self.properties.set_asset(asset if len(assets) == 1 else None, editable)
+        editing = bool(self.edit_session and len(assets) == 1 and
+                       asset_key(asset) == asset_key(self.edit_session['original']))
+        self.edit_button.setEnabled(self.edit_mode or editing or (len(assets) == 1 and editable))
+        self.properties.set_asset(asset if len(assets) == 1 else None, editing, editable)
         for value, button in enumerate(self.star_buttons, 1):
             button.set_filled(value <= rating)
         if not asset:
@@ -607,19 +656,179 @@ class Browser(QtWidgets.QWidget):
                                          '\n\n' + '\n'.join(a['name'] for a in assets))
         self.update_detail_image()
 
-    def save_properties(self, original, changes):
+    def _set_edit_button(self, editing):
+        self.edit_button.blockSignals(True)
+        self.edit_button.setChecked(editing)
+        self.edit_button.blockSignals(False)
+        self.edit_button.setText('Write' if editing else 'Edit')
+        self.edit_button.setStyleSheet(
+            'QPushButton { background: #a62828; border-color: #ef5b5b; color: white; font-weight: bold; }'
+            if editing else '')
+
+    def _freeze_for_edit(self, editing):
+        # Keep both asset views active: choosing another item commits the draft.
+        for widget in (self.refresh, self.ingest_button, self.categories, self.search,
+                       self.invert, self.tags, self.tag_picker, self.kind,
+                       self.length_filter, self.width_filter, self.stars_filter,
+                       self.library_tools_button):
+            widget.setEnabled(not editing)
+        if not editing:
+            self.ingest_button.setEnabled(any(
+                not library.get('read_only') and self.access.can(library['root'], 'ingest')
+                for library in self.settings['libraries']))
+
+    def confirm_edit_override(self, locks):
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle('TinyLib · Library locked')
+        box.setIcon(QtWidgets.QMessageBox.Warning)
+        box.setText(locked_message(locks))
+        box.setInformativeText('As an administrator, you can delete the existing lock and take over editing.')
+        override = box.addButton('Override lock', QtWidgets.QMessageBox.DestructiveRole)
+        box.addButton(QtWidgets.QMessageBox.Cancel)
+        box.exec_() if hasattr(box, 'exec_') else box.exec()
+        return box.clickedButton() is override
+
+    def toggle_edit(self, checked):
+        if checked:
+            self.begin_edit()
+        else:
+            self.write_edit()
+
+    def begin_edit(self):
+        assets = self.selected_assets()
+        if len(assets) != 1:
+            self._set_edit_button(False)
+            return
+        if not self._activate_edit_asset(assets[0], self.selection_source):
+            self.edit_mode = False
+            self._set_edit_button(False)
+            return
+        self.edit_mode = True
+        self._set_edit_button(True)
+        self._freeze_for_edit(True)
+
+    def _activate_edit_asset(self, original, selection_source):
         try:
-            updated = save_asset(self.settings, self.access, original, changes)
+            self.access.refresh()
+            library = writable_library(self.settings, self.access, original)
+            try:
+                handle = acquire_edit_lock(library['root'], self.access.identity)
+            except LibraryEditLocked as error:
+                if not self.access.is_admin:
+                    raise
+                if not self.confirm_edit_override(error.locks):
+                    return False
+                handle = acquire_edit_lock(library['root'], self.access.identity, override=True)
+        except Exception as error:
+            self.show_error(str(error))
+            return False
+        self.edit_session = {'original': original, 'library': library, 'lock': handle,
+                             'selection_source': selection_source}
+        self.properties.set_asset(original, True, True)
+        self.properties.message.setText('Write saves the changes and releases the library lock.')
+        self.status.setText('Write mode · %s locked by %s.' % (library['name'], self.access.identity))
+        return True
+
+    def _release_edit_session(self, update_selection=True, keep_mode=False):
+        if not self.edit_session:
+            return True
+        try:
+            release_edit_lock(self.edit_session['lock'])
+        except Exception as error:
+            self.properties.message.setText('Could not remove the library lock: ' + str(error))
+            self._set_edit_button(True)
+            return False
+        self.edit_session = None
+        if not keep_mode:
+            self.edit_mode = False
+            self._set_edit_button(False)
+            self._freeze_for_edit(False)
+        if update_selection:
+            self.selection()
+        return True
+
+    def _restore_edit_selection(self):
+        """Keep an invalid/failed draft attached to its original selected asset."""
+        if not self.edit_session:
+            return
+        self._restoring_edit_selection = True
+        try:
+            source = self.edit_session.get('selection_source', 'main')
+            original_key = asset_key(self.edit_session['original'])
+            if source == 'collection':
+                model = self.collections.model
+                selection = self.collections.grid.selectionModel()
+            else:
+                model = self.model
+                selection = self.grid.selectionModel()
+            selection.clearSelection()
+            for row, asset in enumerate(model.assets):
+                if asset_key(asset) == original_key:
+                    selection.select(model.index(row, 0),
+                                     QtCore.QItemSelectionModel.Select | QtCore.QItemSelectionModel.Rows)
+                    break
+            self.selection_source = source
+        finally:
+            self._restoring_edit_selection = False
+        self.selection()
+
+    def cancel_edit(self):
+        if self._release_edit_session():
+            self.status.setText('Edit cancelled; library lock released.')
+
+    def write_edit(self, selection_change=False, next_asset=None, next_source=None):
+        if not self.edit_session:
+            if not selection_change:
+                self.edit_mode = False
+                self._set_edit_button(False)
+                self._freeze_for_edit(False)
+                self.selection()
+            return True
+        original = self.edit_session['original']
+        try:
+            changes = self.properties.changes()
+            updated = (save_asset(self.settings, self.access, original, changes,
+                                  edit_token=self.edit_session['lock']['token'])
+                       if changes else original)
         except Exception as error:
             self.properties.message.setText(str(error))
-            return
-        for asset in self.assets:
-            if asset_key(asset) == asset_key(original):
-                asset.clear()
-                asset.update(updated)
-        self.properties.cancel_edit()
-        self.loaded(self.assets, [])
-        self.status.setText('Asset properties saved.')
+            self._set_edit_button(True)
+            return False
+        if changes:
+            original_key = asset_key(original)
+            for asset in self.assets:
+                if asset_key(asset) == original_key:
+                    personal = {key: value for key, value in asset.items() if key.startswith('_')}
+                    asset.clear()
+                    asset.update(updated)
+                    asset.update(personal)
+        self.edit_session['original'] = updated
+        same_library = (selection_change and next_asset is not None and
+                        root_key(next_asset['library_root']) ==
+                        root_key(self.edit_session['library']['root']))
+        if same_library:
+            # Keep the persistent lock and token. With no field changes this
+            # path performs no filesystem or access-config work at all.
+            self.edit_session['original'] = next_asset
+            self.edit_session['selection_source'] = next_source
+            self.properties.set_asset(next_asset, True, True)
+            self.properties.message.setText('Write saves the changes and releases the library lock.')
+            self.status.setText('Write mode · library lock retained.')
+            return True
+        if selection_change and next_asset is None:
+            # Multi/no selection can be temporary. Retain the current library
+            # lock until a new single item is selected or Write ends the mode.
+            self.status.setText('Write mode · library lock retained.')
+            return True
+        if not self._release_edit_session(update_selection=not selection_change,
+                                          keep_mode=selection_change):
+            return False
+        if selection_change:
+            self.status.setText('Asset properties saved; write mode remains active.')
+        else:
+            self.loaded(self.assets, [])
+            self.status.setText('Asset properties saved.')
+        return True
 
     def toggle_tile_info(self, enabled):
         self.grid.cards.info = enabled
@@ -774,6 +983,114 @@ class Browser(QtWidgets.QWidget):
         except Exception as error:
             self.show_error(str(error))
 
+    def library_crosscheck(self):
+        if not self.access.is_admin:
+            self.show_error('Library tools require an administrator account.')
+            return
+        current = self.categories.currentItem()
+        root = current.data(0, QtCore.Qt.UserRole)[0] if current else ''
+        libraries = [library for library in self.settings['libraries']
+                     if self.access.can(library['root'], 'view')]
+        library = next((item for item in libraries if root_key(item['root']) == root_key(root)), None)
+        if library is None:
+            if not libraries:
+                self.show_error('No visible library is available for crosscheck.')
+                return
+            names = [item['name'] for item in libraries]
+            name, accepted = QtWidgets.QInputDialog.getItem(
+                self, 'Library crosscheck', 'Library', names, 0, False)
+            if not accepted:
+                return
+            library = libraries[names.index(name)]
+        dialog = CrosscheckDialog(library, self)
+        dialog.exec_() if hasattr(dialog, 'exec_') else dialog.exec()
+        if dialog.crosscheck_result:
+            self.status.setText('Library crosscheck saved: ' + dialog.crosscheck_result['log_path'])
+
+    def rescan_metadata(self):
+        if not self.access.is_admin:
+            self.show_error('Library tools require an administrator account.')
+            return
+        assets = list(self.selected_assets())
+        if not assets:
+            current = self.categories.currentItem()
+            root = current.data(0, QtCore.Qt.UserRole)[0] if current else ''
+            libraries = [library for library in self.settings['libraries']
+                         if self.access.can(library['root'], 'view')]
+            library = next((item for item in libraries
+                            if root_key(item['root']) == root_key(root)), None)
+            if library is None:
+                names = [item['name'] for item in libraries]
+                if not names:
+                    self.show_error('No visible library is available for metadata rescan.')
+                    return
+                name, accepted = QtWidgets.QInputDialog.getItem(
+                    self, 'Rescan Metadata', 'Library', names, 0, False)
+                if not accepted:
+                    return
+                library = libraries[names.index(name)]
+            assets = [asset for asset in self.assets
+                      if root_key(asset['library_root']) == root_key(library['root'])]
+        if not assets:
+            self.show_error('No assets are available for metadata rescan.')
+            return
+        dialog = MetadataRescanDialog(assets, self.settings, self)
+        accepted = dialog.exec_() if hasattr(dialog, 'exec_') else dialog.exec()
+        if accepted and dialog.scan_result and dialog.scan_result['results']:
+            self.write_rescanned_metadata(dialog.scan_result['results'])
+
+    def write_rescanned_metadata(self, results):
+        groups = {}
+        for result in results:
+            groups.setdefault(root_key(result['asset']['library_root']), []).append(result)
+        handles = []
+        plans = []
+        updated_assets = []
+        try:
+            self.access.refresh()
+            for root, items in groups.items():
+                asset = items[0]['asset']
+                config = writable_library(self.settings, self.access, asset)
+                try:
+                    handle = acquire_edit_lock(config['root'], self.access.identity)
+                except LibraryEditLocked as error:
+                    if not self.access.is_admin or not self.confirm_edit_override(error.locks):
+                        raise
+                    handle = acquire_edit_lock(config['root'], self.access.identity, override=True)
+                handles.append(handle)
+                edits = []
+                for item in items:
+                    metadata = dict(item['asset'].get('metadata', {}))
+                    metadata.update(item['scanned'])
+                    edits.append((item['asset'], {'metadata': metadata}))
+                database = Library(config['root'], config['name'], config.get('legacy_roots', []))
+                plans.append((database, edits, handle))
+            for database, edits, handle in plans:
+                updated_assets.extend(database.update_assets(edits, edit_token=handle['token']))
+        except Exception as error:
+            self.show_error('Metadata was not fully updated: ' + str(error))
+            return
+        finally:
+            release_errors = []
+            for handle in reversed(handles):
+                try:
+                    release_edit_lock(handle)
+                except Exception as error:
+                    release_errors.append(str(error))
+            if release_errors:
+                self.show_error('Metadata write completed, but lock cleanup failed:\n' +
+                                '\n'.join(release_errors))
+        updates = {asset_key(asset): asset for asset in updated_assets}
+        for asset in self.assets:
+            updated = updates.get(asset_key(asset))
+            if updated:
+                personal = {key: value for key, value in asset.items() if key.startswith('_')}
+                asset.clear()
+                asset.update(updated)
+                asset.update(personal)
+        self.loaded(self.assets, [])
+        self.status.setText('Updated metadata for %d asset(s).' % len(updated_assets))
+
     def ingest(self):
         try:
             self.access.refresh()
@@ -800,6 +1117,9 @@ class Browser(QtWidgets.QWidget):
         self.cache.pool.clear()
         if not self.cache.pool.waitForDone(200):
             self.status.setText('Waiting for preview reads; close again in a moment.')
+            event.ignore()
+            return
+        if self.edit_session and not self._release_edit_session():
             event.ignore()
             return
         self.player.stop()

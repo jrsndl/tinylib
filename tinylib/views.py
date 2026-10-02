@@ -15,11 +15,25 @@ from .path_format import format_assets
 from .thumbnail_cache import cache_root, cached_image_path
 from pathlib import Path
 
+UI_FONT_FAMILY = 'Segoe UI'
+UI_FONT_SIZE = 10
+HEADING_FONT_SIZE = 16
+
+
+def interface_font():
+    return QtGui.QFont(UI_FONT_FAMILY, UI_FONT_SIZE)
+
+
+def heading_font():
+    return QtGui.QFont(UI_FONT_FAMILY, HEADING_FONT_SIZE, QtGui.QFont.DemiBold)
+
+
 STYLE = '''
-QWidget { background: #282828; color: #d4d4d4; font-family: "Segoe UI"; font-size: 12px; }
-QLabel#heading { font-size: 21px; font-weight: 600; color: #eeeeee; }
+QWidget { background: #282828; color: #d4d4d4; }
+QLabel#heading { color: #eeeeee; }
 QLabel#muted { color: #969696; }
-QLineEdit, QComboBox, QDoubleSpinBox, QPlainTextEdit { background: #202020; border: 1px solid #444; border-radius: 4px; padding: 7px; selection-background-color: #80623c; }
+QLineEdit, QComboBox, QDoubleSpinBox, QPlainTextEdit { background: #202020; border: 1px solid #444; border-radius: 4px; padding: 4px 7px; selection-background-color: #80623c; }
+QLineEdit { min-height: 20px; }
 QLineEdit:focus, QComboBox:focus { border-color: #bf8d4d; }
 QPushButton { background: #383838; border: 1px solid #4b4b4b; border-radius: 4px; padding: 7px 12px; }
 QPushButton:hover { background: #474747; border-color: #777; }

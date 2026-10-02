@@ -42,6 +42,7 @@ app.processEvents()
 assert not window.assets and not window.errors, window.errors
 assert window.categories.topLevelItemCount() == 1
 assert not window.access_button.isVisible()
+assert not window.library_tools_button.isVisible()
 assert not window.ingest_button.isEnabled()
 assert not window.action_picker.button.isEnabled()
 window.close()

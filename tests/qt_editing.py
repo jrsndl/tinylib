@@ -12,9 +12,11 @@ if QtCore.__name__.startswith('PySide6'):
 else:
     from PySide2.QtTest import QTest
 from tinylib.library import atomic_json, read_json
+from tinylib.edit_lock import acquire_edit_lock, read_edit_locks
 from tinylib.preferences import asset_key, Preferences
 from tinylib.path_format import format_assets
 from tinylib.ui import Browser
+from tinylib.views import STYLE, UI_FONT_FAMILY, UI_FONT_SIZE
 from helpers import test_access
 
 root = Path(__file__).resolve().parents[1]
@@ -31,13 +33,18 @@ records = [{'id': 'fire/%d' % i, 'name': 'Fire %d' % i, 'category': 'fire', 'kin
             'colorspace': 'ACEScg', 'first': 1001, 'last': 1100,
             'metadata': {'width': 640, 'height': 360, 'FPS': 24, 'source': 'C:/hidden/file.exr'}} for i in range(3)]
 records[2]['name'] = 'A complete asset name that must never be shortened in list mode'
-atomic_json(folder / 'data.json', {'schema_version': 3, 'assets': records})
+atomic_json(folder / 'tinylib_data.json', {'schema_version': 3, 'assets': records})
 config = folder / 'studio.json'
 atomic_json(config, {'libraries': [{'name': 'Editable test library', 'root': str(folder)}]})
 preferences = folder / 'preferences.json'
 window = Browser(config, preferences, access=test_access(config))
 window.show()
 assert '#ffa02f' in window.styleSheet() and 'url(:images/' not in window.styleSheet()
+assert window.library_tools_button.isVisible()
+assert [action.text() for action in window.library_tools_button.menu().actions()] == [
+    'Library crosscheck…', 'Rescan Metadata…']
+assert 'font-size' not in STYLE and 'font-family' not in STYLE
+assert window.font().family() == UI_FONT_FAMILY and window.font().pointSize() == UI_FONT_SIZE
 
 
 def pump(ms=80):
@@ -73,6 +80,15 @@ for _ in range(100):
     if not window.loader.isRunning() and window.model.rowCount():
         break
 assert window.model.rowCount() == 3, (window.model.rowCount(), window.errors, window.assets)
+# Library metadata writes use a persistent edit lock and remove it after one bulk JSON update.
+metadata_asset = window.assets[0]
+window.write_rescanned_metadata([{
+    'asset': metadata_asset, 'scanned': {'width': 641},
+    'differences': {'width': {'stored': 640, 'scanned': 641}},
+}])
+pump()
+assert read_json(folder / 'tinylib_data.json')['assets'][0]['metadata']['width'] == 641
+assert not list(folder.glob('lock.*.txt'))
 select(window.model, window.grid, 0)
 # Main-view 0-5 shortcuts apply to the whole selection.
 QTest.keyClick(window.grid, QtCore.Qt.Key_5)
@@ -84,36 +100,91 @@ QTest.keyClick(window.grid, QtCore.Qt.Key_0)
 assert all(window.preferences.rating(asset) == 0 for asset in window.main_selected())
 select(window.model, window.grid, 0)
 editor = window.properties
-assert not editor.lock.isChecked() and editor.fields['name'].isReadOnly()
+assert not window.edit_button.isChecked() and window.edit_button.text() == 'Edit' and editor.fields['name'].isReadOnly()
+assert all(field.minimumHeight() >= 34 and field.maximumHeight() > 34 for field in editor.fields.values())
+assert not hasattr(editor, 'lock') and not hasattr(editor, 'save')
 assert editor.metadata.rowCount() == 3, 'Source paths must not be exposed in metadata fields'
-QTest.mouseClick(editor.lock, QtCore.Qt.LeftButton)
+QTest.mouseClick(window.edit_button, QtCore.Qt.LeftButton)
+assert window.edit_button.text() == 'Write' and '#a62828' in window.edit_button.styleSheet()
+assert len(list(folder.glob('lock.*.txt'))) == 1
 assert editor.fields['name'].isReadOnly()
 assert editor.fields['library'].isReadOnly() and editor.fields['kind'].isReadOnly()
 editor.fields['colorspace'].setText('ACES2065-1')
 editor.fields['tags'].setText('hot, flame')
 assert editor.fields['range'].text() == '1001-1100' and editor.fields['range'].isReadOnly()
 assert not hasattr(editor, 'star_buttons') and not hasattr(editor, 'stars_widget')
-QTest.mouseClick(editor.save, QtCore.Qt.LeftButton)
+assert read_json(folder / 'tinylib_data.json')['assets'][0]['colorspace'] == 'ACEScg', 'Draft must not write before Write'
+QTest.mouseClick(window.edit_button, QtCore.Qt.LeftButton)
 pump()
-saved = read_json(folder / 'data.json')['assets'][0]
+saved = read_json(folder / 'tinylib_data.json')['assets'][0]
 assert saved['name'] == 'Fire 0' and saved['colorspace'] == 'ACES2065-1' and saved['tags'] == ['hot', 'flame']
 assert saved['main'] == records[0]['main'] and saved['kind'] == 'footage'
 assert '_rating' not in saved and 'library_root' not in saved
-assert window.assets[0]['_rating'] == 0 and not editor.lock.isChecked()
+assert window.assets[0]['_rating'] == 0 and not window.edit_button.isChecked()
+assert not list(folder.glob('lock.*.txt'))
+# Asset selection stays active in write mode and commits the draft automatically.
 select(window.model, window.grid, 0)
-QTest.mouseClick(editor.lock, QtCore.Qt.LeftButton)
+QTest.mouseClick(window.edit_button, QtCore.Qt.LeftButton)
+assert window.grid.isEnabled() and window.table.isEnabled()
+retained_lock = next(folder.glob('lock.*.txt'))
+retained_lock_bytes = retained_lock.read_bytes()
+editor.fields['colorspace'].setText('Auto-confirmed')
+window.grid.selectionModel().select(window.model.index(1, 0),
+    QtCore.QItemSelectionModel.ClearAndSelect | QtCore.QItemSelectionModel.Rows)
+pump()
+assert read_json(folder / 'tinylib_data.json')['assets'][0]['colorspace'] == 'Auto-confirmed'
+assert window.main_selected()[0]['name'] == 'Fire 1'
+assert window.edit_button.isChecked() and window.edit_button.text() == 'Write'
+assert editor.editing and editor.asset['name'] == 'Fire 1'
+assert len(list(folder.glob('lock.*.txt'))) == 1
+assert retained_lock.read_bytes() == retained_lock_bytes, 'Same-library selection must retain the lock/token'
+# With no draft changes, another same-library jump performs no disk write.
+database_before_jump = (folder / 'tinylib_data.json').read_bytes()
+window.grid.selectionModel().select(window.model.index(2, 0),
+    QtCore.QItemSelectionModel.ClearAndSelect | QtCore.QItemSelectionModel.Rows)
+pump()
+assert (folder / 'tinylib_data.json').read_bytes() == database_before_jump
+assert retained_lock.read_bytes() == retained_lock_bytes
+assert window.edit_button.isChecked() and editor.asset['name'] == records[2]['name']
+# Write ends edit mode; an unchanged draft must leave the record intact.
+QTest.mouseClick(window.edit_button, QtCore.Qt.LeftButton)
+assert window.main_selected()[0]['name'] == records[2]['name']
+assert not window.edit_button.isChecked() and not list(folder.glob('lock.*.txt'))
+# A failed automatic write restores the edited selection and keeps its draft/lock.
+select(window.model, window.grid, 0)
+QTest.mouseClick(window.edit_button, QtCore.Qt.LeftButton)
+editor.fields['colorspace'].clear()
+window.grid.selectionModel().select(window.model.index(1, 0),
+    QtCore.QItemSelectionModel.ClearAndSelect | QtCore.QItemSelectionModel.Rows)
+pump()
+assert window.edit_button.isChecked() and window.main_selected()[0]['name'] == 'Fire 0'
+assert editor.fields['colorspace'].text() == '' and list(folder.glob('lock.*.txt'))
+window.cancel_edit()
+select(window.model, window.grid, 0)
+QTest.mouseClick(window.edit_button, QtCore.Qt.LeftButton)
 editor.fields['colorspace'].setText('Discard me')
 QTest.mouseClick(editor.cancel, QtCore.Qt.LeftButton)
-assert editor.fields['colorspace'].text() == 'ACES2065-1'
+assert editor.fields['colorspace'].text() == 'Auto-confirmed'
+assert not list(folder.glob('lock.*.txt'))
 # A permission change after unlocking is checked again at save time.
-QTest.mouseClick(editor.lock, QtCore.Qt.LeftButton)
+QTest.mouseClick(window.edit_button, QtCore.Qt.LeftButton)
 editor.fields['colorspace'].setText('Denied')
 window.settings['libraries'][0]['read_only'] = True
-QTest.mouseClick(editor.save, QtCore.Qt.LeftButton)
+QTest.mouseClick(window.edit_button, QtCore.Qt.LeftButton)
 assert 'read-only' in editor.message.text()
-assert read_json(folder / 'data.json')['assets'][0]['colorspace'] == 'ACES2065-1'
-editor.cancel_edit()
+assert read_json(folder / 'tinylib_data.json')['assets'][0]['colorspace'] == 'Auto-confirmed'
+assert window.edit_button.isChecked() and list(folder.glob('lock.*.txt'))
+window.cancel_edit()
 window.settings['libraries'][0]['read_only'] = False
+window.selection()
+# Admins can explicitly replace another user's persistent lock.
+foreign_lock = acquire_edit_lock(folder, 'other.user')
+with patch.object(window, 'confirm_edit_override', return_value=True) as confirm_override:
+    QTest.mouseClick(window.edit_button, QtCore.Qt.LeftButton)
+    assert confirm_override.call_count == 1
+assert read_edit_locks(folder)[0]['identity'] == window.access.identity
+window.cancel_edit()
+assert not list(folder.glob('lock.*.txt'))
 # Enter only opens a single selection, in every main view mode.
 with patch.object(window.player, 'play') as play:
     for mode in ('Tiles', 'Details', 'List'):
@@ -197,9 +268,10 @@ with patch.object(QtWidgets.QInputDialog, 'getMultiLineText', return_value=(r'{n
     window.configure_tile_text()
 assert window.grid.cards.template == r'{name}\n{category}\n{width} × {height}'
 assert Preferences(preferences).data['display']['tile_info'] is True
-QTest.mouseClick(editor.lock, QtCore.Qt.LeftButton)
+QTest.mouseClick(window.edit_button, QtCore.Qt.LeftButton)
 pump()
 window.grab().save(str(output / ('editing-info-' + QtCore.__name__.split('.')[0] + '.png')))
 window.cache.pool.waitForDone()
 window.close()
+assert not list(folder.glob('lock.*.txt')), 'Normal app closure must release its edit lock'
 print('Editing UI passed:', QtCore.__name__, 'drag-back in all modes, Enter, info/template preferences, save/cancel, immutable fields and read-only enforcement')

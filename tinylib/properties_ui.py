@@ -1,22 +1,9 @@
-"""Locked-by-default asset metadata form, with an explicit Save/Cancel workflow."""
+"""Asset metadata form controlled by the browser-wide Edit/Write session."""
 import copy
 import json
 import re
-from .qt import QtCore, QtGui, QtWidgets
+from .qt import QtCore, QtWidgets
 from .preferences import asset_key
-
-
-def lock_icon(unlocked):
-    pixmap = QtGui.QPixmap(24, 24)
-    pixmap.fill(QtCore.Qt.transparent)
-    painter = QtGui.QPainter(pixmap)
-    painter.setRenderHint(QtGui.QPainter.Antialiasing)
-    painter.setPen(QtGui.QPen(QtGui.QColor('#dddddd'), 2))
-    painter.drawRoundedRect(QtCore.QRectF(5, 11, 14, 10), 2, 2)
-    painter.drawArc(QtCore.QRectF(8 if not unlocked else 13, 3, 9, 14), 0, 180 * 16)
-    painter.drawLine(12, 15, 12, 18)
-    painter.end()
-    return QtGui.QIcon(pixmap)
 
 
 def visible_metadata(key, value):
@@ -25,19 +12,15 @@ def visible_metadata(key, value):
 
 
 class PropertiesEditor(QtWidgets.QWidget):
-    save_requested = QtCore.Signal(object, object)
+    cancel_requested = QtCore.Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.asset = None
+        self.editing = False
         self.fields = {}
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        self.lock = QtWidgets.QPushButton('Edit properties')
-        self.lock.setCheckable(True)
-        self.lock.setIcon(lock_icon(False))
-        self.lock.toggled.connect(self.toggle)
-        layout.addWidget(self.lock)
         scroll = QtWidgets.QScrollArea()
         scroll.setWidgetResizable(True)
         content = QtWidgets.QWidget()
@@ -54,7 +37,10 @@ class PropertiesEditor(QtWidgets.QWidget):
                            ('Range', 'range'), ('Color space', 'colorspace'),
                            ('Keywords', 'tags')]:
             field = QtWidgets.QLineEdit()
-            field.setMaximumHeight(27)
+            # Nuke's host style can under-report QLineEdit's size hint. The
+            # stylesheet supplies the content-height floor and compact padding;
+            # this widget floor prevents a form row from compressing it again.
+            field.setMinimumHeight(34)
             self.fields[key] = field
             target = self.summary if key in ('name', 'library', 'category', 'kind', 'range') else self.form
             target.addRow(label, field)
@@ -78,26 +64,21 @@ class PropertiesEditor(QtWidgets.QWidget):
         self.buttons = QtWidgets.QWidget()
         row = QtWidgets.QHBoxLayout(self.buttons)
         row.setContentsMargins(0, 0, 0, 0)
-        self.save = QtWidgets.QPushButton('Save')
-        self.save.clicked.connect(self.submit)
-        self.cancel = QtWidgets.QPushButton('Cancel')
-        self.cancel.clicked.connect(self.cancel_edit)
-        row.addWidget(self.save)
+        self.cancel = QtWidgets.QPushButton('Cancel edit')
+        self.cancel.clicked.connect(self.cancel_requested.emit)
         row.addWidget(self.cancel)
         layout.addWidget(self.buttons)
-        self.toggle(False)
+        self.set_editing(False)
 
-    def set_asset(self, asset, editable=False):
-        if self.asset and asset and asset_key(self.asset) == asset_key(asset) and self.lock.isChecked():
+    def set_asset(self, asset, editing=False, can_edit=False):
+        if editing and self.editing and self.asset and asset and asset_key(self.asset) == asset_key(asset):
             return  # Keep the draft through unrelated selection/paint notifications.
         self.asset = copy.deepcopy(asset) if asset else None
-        self.lock.blockSignals(True)
-        self.lock.setChecked(False)
-        self.lock.blockSignals(False)
-        self.lock.setEnabled(bool(asset) and editable)
-        self.message.setText('' if editable else 'Read-only library or insufficient write permission.')
+        self.message.setText('' if editing else
+                             'Use Edit to modify this library.' if can_edit else
+                             'Read-only library or insufficient write permission.')
         self.fill()
-        self.toggle(False)
+        self.set_editing(editing)
 
     def fill(self):
         asset = self.asset or {}
@@ -119,33 +100,23 @@ class PropertiesEditor(QtWidgets.QWidget):
             self.metadata.setItem(row, 0, label)
             self.metadata.setItem(row, 1, QtWidgets.QTableWidgetItem(value if isinstance(value, str) else json.dumps(value)))
 
-    def toggle(self, editing):
-        self.lock.setIcon(lock_icon(editing))
-        self.lock.setText('Editing — unlocked' if editing else 'Edit properties')
+    def set_editing(self, editing):
+        self.editing = bool(editing and self.asset)
         for key, field in self.fields.items():
-            field.setReadOnly(not editing or key in ('name', 'library', 'category', 'kind', 'range'))
+            field.setReadOnly(not self.editing or key in ('name', 'library', 'category', 'kind', 'range'))
             field.setStyleSheet('color: #888; background: #252525;' if key in ('name', 'library', 'category', 'kind', 'range') else '')
-        self.metadata.setEditTriggers(QtWidgets.QAbstractItemView.DoubleClicked | QtWidgets.QAbstractItemView.EditKeyPressed if editing else QtWidgets.QAbstractItemView.NoEditTriggers)
-        self.buttons.setVisible(editing)
-        if not editing and self.asset:
-            self.fill()
+        self.metadata.setEditTriggers(QtWidgets.QAbstractItemView.DoubleClicked | QtWidgets.QAbstractItemView.EditKeyPressed if self.editing else QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.buttons.setVisible(self.editing)
 
-    def cancel_edit(self):
-        self.lock.setChecked(False)
-
-    def submit(self):
-        if not self.asset or not self.lock.isChecked():
-            return
-        try:
-            updated = {'colorspace': self.fields['colorspace'].text().strip()}
-            updated['tags'] = list(dict.fromkeys(tag.strip() for tag in self.fields['tags'].text().split(',') if tag.strip()))
-            metadata = copy.deepcopy(self.asset.get('metadata', {}))
-            for row in range(self.metadata.rowCount()):
-                key = self.metadata.item(row, 0).text()
-                text = self.metadata.item(row, 1).text()
-                metadata[key] = text if isinstance(metadata[key], str) else json.loads(text)
-            updated['metadata'] = metadata
-            changes = {key: value for key, value in updated.items() if value != self.asset.get(key)}
-            self.save_requested.emit(self.asset, changes)
-        except (ValueError, TypeError) as error:
-            self.message.setText(str(error))
+    def changes(self):
+        if not self.asset or not self.editing:
+            return {}
+        updated = {'colorspace': self.fields['colorspace'].text().strip()}
+        updated['tags'] = list(dict.fromkeys(tag.strip() for tag in self.fields['tags'].text().split(',') if tag.strip()))
+        metadata = copy.deepcopy(self.asset.get('metadata', {}))
+        for row in range(self.metadata.rowCount()):
+            key = self.metadata.item(row, 0).text()
+            text = self.metadata.item(row, 1).text()
+            metadata[key] = text if isinstance(metadata[key], str) else json.loads(text)
+        updated['metadata'] = metadata
+        return {key: value for key, value in updated.items() if value != self.asset.get(key)}

@@ -2,6 +2,7 @@
 import json
 from pathlib import Path
 from .qt import QtCore, QtWidgets
+from .views import heading_font
 from .ingest import (clean_asset_name, keywords_from_name, make_manifest,
                      prepare_source, save_manifest, submit_deadline)
 from .asset_types import ASSET_TYPES, default_metadata
@@ -64,6 +65,7 @@ class IngestDialog(QtWidgets.QDialog):
         layout = QtWidgets.QVBoxLayout(self)
         title = QtWidgets.QLabel('Add an asset to the library')
         title.setObjectName('heading')
+        title.setFont(heading_font())
         layout.addWidget(title)
         scroll = QtWidgets.QScrollArea()
         scroll.setWidgetResizable(True)
