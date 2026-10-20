@@ -143,6 +143,8 @@ class ImageCache(QtCore.QObject):
         super().__init__(parent)
         self.disk_root = Path(disk_root) if disk_root else cache_root()
         self.images = OrderedDict()
+        self.fallbacks = OrderedDict()
+        self.fallback_bytes = 0
         self.bytes = 0
         self.disk_hits = 0
         self.source_loads = 0
@@ -169,6 +171,12 @@ class ImageCache(QtCore.QObject):
             self.requested += 1
             self.pool.start(ImageRead(path, self.signals, self.disk_root))
             self.activity.emit(self.snapshot())
+        return self.fallback(path)
+
+    def fallback(self, path):
+        if path in self.fallbacks:
+            self.fallbacks.move_to_end(path)
+            return self.fallbacks[path]
         return QtGui.QPixmap()
 
     def received(self, path, image, from_disk):
@@ -180,6 +188,25 @@ class ImageCache(QtCore.QObject):
             self.source_loads += 1
         else:
             self.failures += 1
+        # Keep inexpensive posters outside the large-image LRU. A cache miss
+        # during animation or resizing should not erase an already-seen preview.
+        if not image.isNull():
+            poster = image
+            if image.width() in (5760, 11520) and image.height() in (135, 270):
+                poster = image.copy(0, 0, image.width() // 24, image.height())
+            poster = QtGui.QPixmap.fromImage(poster.scaled(240, 135, QtCore.Qt.KeepAspectRatio,
+                                                         QtCore.Qt.SmoothTransformation))
+            previous = self.fallbacks.pop(path, None)
+            if previous is not None:
+                self.fallback_bytes -= previous.width() * previous.height() * 4
+            self.fallbacks[path] = poster
+            self.fallback_bytes += poster.width() * poster.height() * 4
+            while len(self.fallbacks) > 512 or self.fallback_bytes > 24 * 1024 * 1024:
+                _, removed = self.fallbacks.popitem(last=False)
+                self.fallback_bytes -= removed.width() * removed.height() * 4
+        previous = self.images.pop(path, None)
+        if previous is not None:
+            self.bytes -= previous.width() * previous.height() * 4
         self.images[path] = QtGui.QPixmap.fromImage(image)
         self.bytes += image.width() * image.height() * 4
         while len(self.images) > 160 or self.bytes > 96 * 1024 * 1024:
@@ -277,7 +304,11 @@ class Cards(QtWidgets.QStyledItemDelegate):
             if not strip.isNull() and strip.width() in (5760, 11520) and strip.height() in (135, 270):
                 width = strip.width() // 24
                 return strip.copy(self.frame * width, 0, width, strip.height())
-        return self.cache.get(asset.get('thumb', ''))
+        thumbnail = self.cache.get(asset.get('thumb', ''))
+        if not thumbnail.isNull():
+            return thumbnail
+        # A filmstrip poster also covers assets whose thumbnail is still queued.
+        return self.cache.fallback(asset.get('filmstrip', ''))
 
     def sizeHint(self, option, index):
         lines = len(validate_template(self.template).split('\n')) if self.template else 0
@@ -303,7 +334,8 @@ class Cards(QtWidgets.QStyledItemDelegate):
             painter.drawPixmap(target, pixmap)
         else:
             painter.setPen(QtGui.QColor('#707070'))
-            painter.drawText(image_rect, QtCore.Qt.AlignCenter, 'Preview unavailable')
+            loading = any(asset.get(role) in self.cache.pending for role in ('thumb', 'filmstrip'))
+            painter.drawText(image_rect, QtCore.Qt.AlignCenter, 'Loading preview...' if loading else 'Preview unavailable')
         if self.info:
             metrics = painter.fontMetrics()
             lines = render_template(self.template, asset).split('\n') if self.template else []

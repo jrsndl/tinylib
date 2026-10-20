@@ -45,14 +45,16 @@ class FrameDecoder(QtCore.QObject):
     CHUNK = 32
     BUDGET = 128 * 1024 * 1024
 
-    def __init__(self, settings, media, stream, fps, count, parent=None):
+    def __init__(self, settings, media, stream, fps, count, parent=None, full_resolution=False):
         super().__init__(parent)
         self.executable = settings.get('tools', {}).get('ffmpeg', 'ffmpeg')
         self.media, self.fps, self.count = media, fps, count
         width, height = int(stream['width']), int(stream['height'])
         if width <= 0 or height <= 0:
             raise ValueError('Invalid preview dimensions.')
-        scale = min(1, 960 / width, 540 / height)
+        if full_resolution:
+            self.CHUNK = 1
+        scale = 1 if full_resolution else min(1, 960 / width, 540 / height)
         self.width, self.height = max(1, round(width * scale)), max(1, round(height * scale))
         self.frame_bytes = self.width * self.height * 3
         self.limit = max(self.CHUNK * 2, self.BUDGET // self.frame_bytes)
@@ -216,7 +218,8 @@ class ReviewPlayer(QtWidgets.QWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(QtCore.Qt.StrongFocus)
         self.setToolTip('J/L: reverse/forward, repeat for speed · K: stop · Space: play/stop\n'
-                        'Left/Right: one frame · O: frame overlay · Hover bottom: timeline and Loop')
+                        'Left/Right: one frame · O: frame overlay · Ctrl+C: copy stopped frame at full resolution\n'
+                        'Hover bottom: timeline and Loop')
         self.fps, self.count = media_info(asset, stream)
         self.first = int(asset['first']) if asset.get('first') is not None else 1
         self.current = 0
@@ -231,6 +234,9 @@ class ReviewPlayer(QtWidgets.QWidget):
         self.fraction = 0.0
         self.failure = ''
         self.scrubbing = False
+        self.copy_decoder = None
+        self.copy_target = None
+        self.copy_settings, self.copy_stream = settings, dict(stream)
         self.decoder = FrameDecoder(settings, asset.get('proxy') or asset.get('thumb'), stream, self.fps, self.count, self)
         self.decoder.available.connect(self.frame_ready)
         self.decoder.error.connect(self.decode_error)
@@ -375,7 +381,43 @@ class ReviewPlayer(QtWidgets.QWidget):
         self.stop_playback()
         self.error.emit(message)
 
+    def copy_current_frame(self):
+        if self.direction or self.pending or self.scrubbing or self.failure or self.picture.isNull():
+            return
+        self.copy_target = self.current
+        if (self.picture.width(), self.picture.height()) == (int(self.copy_stream['width']), int(self.copy_stream['height'])):
+            self.copy_image(self.picture)
+            return
+        if self.copy_decoder is None:
+            self.copy_decoder = FrameDecoder(self.copy_settings, self.decoder.media, self.copy_stream,
+                                             self.fps, self.count, self, full_resolution=True)
+            self.copy_decoder.available.connect(self.copy_frame_ready)
+            self.copy_decoder.error.connect(self.copy_error)
+        image = self.copy_decoder.image(self.copy_target)
+        if image is not None:
+            self.copy_image(image)
+        else:
+            self.copy_decoder.request(self.copy_target)
+
+    def copy_frame_ready(self, frame):
+        if frame == self.copy_target:
+            self.copy_image(self.copy_decoder.image(frame))
+
+    def copy_image(self, image):
+        QtWidgets.QApplication.clipboard().setImage(image.copy())
+        self.rating_feedback = 'Frame copied'
+        self.rating_timer.start()
+        self.update()
+
+    def copy_error(self, message):
+        self.error.emit('Could not copy proxy frame: ' + message)
+
     def keyPressEvent(self, event):
+        if event.matches(QtGui.QKeySequence.Copy):
+            if not event.isAutoRepeat():
+                self.copy_current_frame()
+            event.accept()
+            return
         key = event.key()
         ratings = {QtCore.Qt.Key_0: 0, QtCore.Qt.Key_1: 1, QtCore.Qt.Key_2: 2,
                    QtCore.Qt.Key_3: 3, QtCore.Qt.Key_4: 4, QtCore.Qt.Key_5: 5}
@@ -458,5 +500,7 @@ class ReviewPlayer(QtWidgets.QWidget):
         self.debounce.stop()
         self.rating_timer.stop()
         self.decoder.close()
+        if self.copy_decoder is not None:
+            self.copy_decoder.close()
         self.closed.emit()
         super().closeEvent(event)

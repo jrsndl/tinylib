@@ -64,6 +64,24 @@ class AssetEditTests(unittest.TestCase):
                 save_asset(self.config, self.access, self.asset, {'colorspace': 'Failed'})
         self.assertEqual((self.root / 'tinylib_data.json').read_bytes(), before)
 
+    def test_save_skips_media_scans_and_preserves_unrelated_raw_records(self):
+        path = self.root / 'tinylib_data.json'
+        document = read_json(path)
+        untouched = {'id': 'other/untouched', 'name': 'Untouched', 'category': 'other',
+                     'kind': 'still', 'main': 'other/untouched/main/image.exr',
+                     'custom': {'preserve': [1, 2, 3]}}
+        document['assets'].append(untouched)
+        atomic_json(path, document)
+        original = dict(self.asset, proxy='discovered/proxy.mp4')
+        with patch.object(Library, 'load', side_effect=AssertionError('No full library reload')), \
+                patch.object(Path, 'iterdir', side_effect=AssertionError('No media folder scans')):
+            saved = save_asset(self.config, self.access, original, {'tags': ['fast edit']})
+        self.assertEqual(saved['tags'], ['fast edit'])
+        self.assertEqual(saved['proxy'], 'discovered/proxy.mp4')
+        result = read_json(path)
+        self.assertEqual(result['assets'][1], untouched)
+        self.assertEqual(result['assets'][0]['main'], self.record['main'])
+
     def test_legacy_edit_keeps_backup(self):
         legacy = {'data': {'elements': {'root|fire': [{'source': str(self.root / 'fire/Test/main/Test.####.exr') + ' 1-10', 'tags': []}]}}}
         atomic_json(self.root / 'tinylib_data.json', legacy)

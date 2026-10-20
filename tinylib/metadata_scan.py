@@ -115,6 +115,33 @@ def probe_container(path, ffprobe):
     return _probe_container(path, ffprobe)[0]
 
 
+def scan_source_metadata(value, settings):
+    """Probe an ingest footage source without writing metadata sidecars."""
+    from .ingest import prepare_source
+    from .library import split_sequence, sequence_files
+    source = prepare_source(value, 'footage', settings)
+    pattern, first, last = split_sequence(source)
+    files = sequence_files(source)
+    sample = files[0]
+    tools = settings.get('tools', {})
+    containers = extension_groups(settings)['extensions_footage_containers']
+    container = sample.suffix.casefold().lstrip('.') in containers
+    metadata = (probe_container(sample, tools.get('ffprobe', 'ffprobe')) if container else
+                probe_image(sample, tools.get('oiiotool', 'oiiotool')))
+    if first is not None:
+        metadata.update(frame_start=first, frame_end=last, duration_frames=last - first + 1)
+        if metadata.get('FPS'):
+            metadata['duration_seconds'] = metadata['duration_frames'] / metadata['FPS']
+    elif metadata.get('duration_frames') is not None:
+        metadata.update(frame_start=0, frame_end=metadata['duration_frames'] - 1)
+    metadata['is_raw'] = sample.suffix.casefold().lstrip('.') in extension_groups(settings)['extensions_stills_raw']
+    metadata['file_size_main'] = sum(path.stat().st_size for path in files)
+    metadata['file_size_total'] = metadata['file_size_main']
+    if 'FPS' in metadata:
+        metadata['frame_rate'] = metadata.pop('FPS')
+    return metadata
+
+
 def _tree_size(path):
     path = Path(path)
     if path.is_file():

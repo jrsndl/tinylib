@@ -1,9 +1,11 @@
 """Admin UI for long-running library maintenance checks."""
 import time
+import copy
 from pathlib import Path
 
 from .qt import QtCore, QtGui, QtWidgets
-from .library_tools import CrosscheckCancelled, crosscheck_library
+from .library_tools import CrosscheckCancelled, crosscheck_library, sort_library, create_new_library
+from .edit_lock import LibraryEditLocked
 from .metadata_scan import format_scan_summary, scan_assets
 
 
@@ -216,3 +218,192 @@ class MetadataRescanDialog(QtWidgets.QDialog):
             event.ignore()
             return
         super().closeEvent(event)
+
+
+class LibrarySortWorker(QtCore.QThread):
+    progress = QtCore.Signal(str)
+    completed = QtCore.Signal(object)
+    failed = QtCore.Signal(object)
+
+    def __init__(self, library, settings, access, override=False, parent=None):
+        super().__init__(parent)
+        self.library, self.settings = library, settings
+        self.access, self.override = copy.copy(access), override
+
+    def run(self):
+        try:
+            self.completed.emit(sort_library(self.settings, self.access, self.library,
+                                             self.override, self.progress.emit))
+        except Exception as error:
+            self.failed.emit(error)
+
+
+class LibrarySortDialog(QtWidgets.QDialog):
+    def __init__(self, library, settings, access, parent=None):
+        super().__init__(parent)
+        self.library, self.settings, self.access = library, settings, access
+        self.sort_result, self.error = None, None
+        self.setWindowTitle('Library Sort - ' + library['name'])
+        self.resize(520, 150)
+        layout = QtWidgets.QVBoxLayout(self)
+        self.summary = QtWidgets.QLabel('Preparing Library Sort...')
+        self.summary.setWordWrap(True)
+        layout.addWidget(self.summary)
+        self.progress_bar = QtWidgets.QProgressBar()
+        self.progress_bar.setRange(0, 0)
+        layout.addWidget(self.progress_bar)
+        self.close_button = QtWidgets.QPushButton('Close')
+        self.close_button.setEnabled(False)
+        self.close_button.clicked.connect(self.reject)
+        layout.addWidget(self.close_button)
+        self.start_sort()
+
+    def start_sort(self, override=False):
+        self.error = None
+        self.worker = LibrarySortWorker(self.library, self.settings, self.access, override, self)
+        self.worker.progress.connect(self.summary.setText)
+        self.worker.completed.connect(self.complete)
+        self.worker.failed.connect(self.fail)
+        self.worker.finished.connect(self.finished_sort)
+        self.worker.start()
+
+    def complete(self, result):
+        self.sort_result = result
+
+    def fail(self, error):
+        self.error = error
+
+    def finished_sort(self):
+        if self.sort_result is not None:
+            self.accept()
+        elif (isinstance(self.error, LibraryEditLocked) and self.access.is_admin
+              and self.parentWidget() is not None
+              and self.parentWidget().confirm_edit_override(self.error.locks)):
+            self.start_sort(override=True)
+        else:
+            self.summary.setText('Library Sort failed: ' + str(self.error))
+            self.progress_bar.setRange(0, 1)
+            self.close_button.setEnabled(True)
+
+    def reject(self):
+        if not self.worker.isRunning():
+            super().reject()
+
+    def closeEvent(self, event):
+        if self.worker.isRunning():
+            event.ignore()
+        else:
+            super().closeEvent(event)
+
+
+class CreateLibraryWorker(QtCore.QThread):
+    progress = QtCore.Signal(str)
+    completed = QtCore.Signal(object)
+    failed = QtCore.Signal(str)
+
+    def __init__(self, settings, access, name, root, template, read_only, parent):
+        super().__init__(parent)
+        self.settings, self.access = settings, copy.copy(access)
+        self.name, self.root, self.template, self.read_only = name, root, template, read_only
+
+    def run(self):
+        try:
+            self.completed.emit(create_new_library(self.settings, self.access, self.name, self.root,
+                                                   self.template, self.read_only, self.progress.emit))
+        except Exception as error:
+            self.failed.emit(str(error))
+
+
+class CreateLibraryDialog(QtWidgets.QDialog):
+    def __init__(self, settings, access, parent=None):
+        super().__init__(parent)
+        self.settings, self.access = settings, access
+        self.created_library, self.worker = None, None
+        self.setWindowTitle('Create New Library')
+        self.resize(600, 240)
+        layout = QtWidgets.QVBoxLayout(self)
+        self.inputs = QtWidgets.QWidget()
+        form = QtWidgets.QFormLayout(self.inputs)
+        self.name = QtWidgets.QLineEdit()
+        self.name.setPlaceholderText('New library name')
+        form.addRow('Library name', self.name)
+        folder = QtWidgets.QWidget()
+        row = QtWidgets.QHBoxLayout(folder)
+        row.setContentsMargins(0, 0, 0, 0)
+        self.root = QtWidgets.QLineEdit()
+        browse = QtWidgets.QPushButton('Choose folder...')
+        browse.clicked.connect(self.browse)
+        row.addWidget(self.root, 1)
+        row.addWidget(browse)
+        form.addRow('Root folder', folder)
+        self.template = QtWidgets.QComboBox()
+        self.template.addItem('Studio defaults', None)
+        for library in settings['libraries']:
+            self.template.addItem(library['name'], library['root'])
+        self.template.currentIndexChanged.connect(self.template_changed)
+        form.addRow('Copy settings from', self.template)
+        self.read_only = QtWidgets.QCheckBox('Read-only library')
+        form.addRow('', self.read_only)
+        self.template_changed()
+        layout.addWidget(self.inputs)
+        self.message = QtWidgets.QLabel('Creates an empty tinylib_data.json and adds the library to the studio. '
+                                       'Tool paths and processing profiles use the shared studio settings.')
+        self.message.setWordWrap(True)
+        layout.addWidget(self.message)
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Cancel)
+        self.create_button = buttons.addButton('Create library', QtWidgets.QDialogButtonBox.AcceptRole)
+        self.create_button.clicked.connect(self.create_library)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def template_changed(self, *_):
+        root = self.template.currentData()
+        source = next((item for item in self.settings['libraries'] if item['root'] == root),
+                      self.settings.get('library_defaults', {}))
+        self.read_only.setChecked(bool(source.get('read_only', False)))
+
+    def browse(self):
+        root = QtWidgets.QFileDialog.getExistingDirectory(self, 'New library root folder', self.root.text())
+        if root:
+            self.root.setText(root)
+            if not self.name.text().strip():
+                self.name.setText(Path(root).name)
+
+    def create_library(self):
+        if self.worker is not None and self.worker.isRunning():
+            return
+        if not self.name.text().strip() or not self.root.text().strip():
+            self.message.setText('Enter a library name and choose a root folder.')
+            return
+        self.inputs.setEnabled(False)
+        self.create_button.setEnabled(False)
+        self.worker = CreateLibraryWorker(self.settings, self.access, self.name.text(), self.root.text(),
+                                          self.template.currentData(), self.read_only.isChecked(), self)
+        self.worker.progress.connect(self.message.setText)
+        self.worker.completed.connect(self.complete)
+        self.worker.failed.connect(self.message.setText)
+        self.worker.finished.connect(self.finished_creation)
+        self.worker.start()
+
+    def complete(self, library):
+        self.created_library = library
+        if not self.access.persist:
+            self.access._memory = copy.deepcopy(self.worker.access._memory)
+            self.access.refresh()
+
+    def finished_creation(self):
+        if self.created_library is not None:
+            self.accept()
+        else:
+            self.inputs.setEnabled(True)
+            self.create_button.setEnabled(True)
+
+    def reject(self):
+        if self.worker is None or not self.worker.isRunning():
+            super().reject()
+
+    def closeEvent(self, event):
+        if self.worker is not None and self.worker.isRunning():
+            event.ignore()
+        else:
+            super().closeEvent(event)

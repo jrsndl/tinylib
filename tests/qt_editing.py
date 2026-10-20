@@ -42,7 +42,7 @@ window.show()
 assert '#ffa02f' in window.styleSheet() and 'url(:images/' not in window.styleSheet()
 assert window.library_tools_button.isVisible()
 assert [action.text() for action in window.library_tools_button.menu().actions()] == [
-    'Library crosscheck…', 'Rescan Metadata…']
+    'Library crosscheck…', 'Rescan Metadata…', 'Library Sort...', 'Create New Library...']
 assert 'font-size' not in STYLE and 'font-family' not in STYLE
 assert window.font().family() == UI_FONT_FAMILY and window.font().pointSize() == UI_FONT_SIZE
 
@@ -80,6 +80,19 @@ for _ in range(100):
     if not window.loader.isRunning() and window.model.rowCount():
         break
 assert window.model.rowCount() == 3, (window.model.rowCount(), window.errors, window.assets)
+# The properties divider can grow the right panel beyond its former 320px cap.
+window.resize(1600, 1000)
+pump()
+window.splitter.setSizes([190, 800, 0, 500])
+pump()
+properties_panel = window.splitter.widget(window.splitter.count() - 1)
+assert properties_panel.width() > 400, window.splitter.sizes()
+window.splitter.setSizes([190, 1000, 0, 300])
+pump()
+assert properties_panel.width() < 400, window.splitter.sizes()
+assert isinstance(window.properties.fields['tags'], QtWidgets.QPlainTextEdit)
+assert window.properties.fields['tags'].minimumHeight() >= 2 * window.properties.fields['tags'].fontMetrics().lineSpacing()
+
 # Library metadata writes use a persistent edit lock and remove it after one bulk JSON update.
 metadata_asset = window.assets[0]
 window.write_rescanned_metadata([{
@@ -101,7 +114,8 @@ assert all(window.preferences.rating(asset) == 0 for asset in window.main_select
 select(window.model, window.grid, 0)
 editor = window.properties
 assert not window.edit_button.isChecked() and window.edit_button.text() == 'Edit' and editor.fields['name'].isReadOnly()
-assert all(field.minimumHeight() >= 34 and field.maximumHeight() > 34 for field in editor.fields.values())
+assert all(field.minimumHeight() >= 34 and field.maximumHeight() > 34
+           for field in editor.fields.values() if isinstance(field, QtWidgets.QLineEdit))
 assert not hasattr(editor, 'lock') and not hasattr(editor, 'save')
 assert editor.metadata.rowCount() == 3, 'Source paths must not be exposed in metadata fields'
 QTest.mouseClick(window.edit_button, QtCore.Qt.LeftButton)
@@ -110,7 +124,7 @@ assert len(list(folder.glob('lock.*.txt'))) == 1
 assert editor.fields['name'].isReadOnly()
 assert editor.fields['library'].isReadOnly() and editor.fields['kind'].isReadOnly()
 editor.fields['colorspace'].setText('ACES2065-1')
-editor.fields['tags'].setText('hot, flame')
+editor.fields['tags'].setPlainText('hot,\nflame')
 assert editor.fields['range'].text() == '1001-1100' and editor.fields['range'].isReadOnly()
 assert not hasattr(editor, 'star_buttons') and not hasattr(editor, 'stars_widget')
 assert read_json(folder / 'tinylib_data.json')['assets'][0]['colorspace'] == 'ACEScg', 'Draft must not write before Write'
@@ -140,9 +154,11 @@ assert len(list(folder.glob('lock.*.txt'))) == 1
 assert retained_lock.read_bytes() == retained_lock_bytes, 'Same-library selection must retain the lock/token'
 # With no draft changes, another same-library jump performs no disk write.
 database_before_jump = (folder / 'tinylib_data.json').read_bytes()
-window.grid.selectionModel().select(window.model.index(2, 0),
-    QtCore.QItemSelectionModel.ClearAndSelect | QtCore.QItemSelectionModel.Rows)
-pump()
+with patch('tinylib.ui.save_asset', side_effect=AssertionError('Unchanged selection must not save')), \
+        patch.object(window.access, 'refresh', side_effect=AssertionError('Unchanged selection must not read permissions')):
+    window.grid.selectionModel().select(window.model.index(2, 0),
+        QtCore.QItemSelectionModel.ClearAndSelect | QtCore.QItemSelectionModel.Rows)
+    pump()
 assert (folder / 'tinylib_data.json').read_bytes() == database_before_jump
 assert retained_lock.read_bytes() == retained_lock_bytes
 assert window.edit_button.isChecked() and editor.asset['name'] == records[2]['name']

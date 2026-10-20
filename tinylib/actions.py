@@ -35,6 +35,10 @@ class Action:
         if not re.fullmatch(r'[a-zA-Z0-9_.-]+', self.manifest['id']):
             raise ValueError('Invalid action id.')
         self.id = self.manifest['id']
+        self.allow_only = self.manifest.get('allow_only')
+        if self.allow_only is not None and (not isinstance(self.allow_only, list) or
+                not all(isinstance(group, str) and group.strip() for group in self.allow_only)):
+            raise ValueError('allow_only must be a list of group names.')
         self.code = local_file(self.folder, self.manifest.get('entrypoint', 'action.py'))
         if self.code.suffix != '.py' or not self.code.is_file():
             raise ValueError('Action needs a Python entrypoint.')
@@ -107,7 +111,7 @@ class ActionRegistry:
                     self.errors.append(str(manifest) + ': ' + str(error))
 
     def allowed(self, action, assets, access, host=None):
-        return bool(assets) and action.accepts(assets, host) and all(
+        return (action.allow_only is None or bool(access.groups.intersection(action.allow_only))) and bool(assets) and action.accepts(assets, host) and all(
             access.can(asset['library_root'], 'view') and access.can(asset['library_root'], 'action', action.id)
             for asset in assets)
 

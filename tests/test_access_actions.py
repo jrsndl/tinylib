@@ -24,7 +24,7 @@ class AccessActionTests(unittest.TestCase):
 
     def grant(self):
         libraries = copy.deepcopy(self.admin.data['libraries'])
-        libraries[0]['permissions']['actions']['test.action'] = ['users']
+        libraries[0]['permissions']['actions'] = ['users']
         self.admin.save({'studio\\first': DEFAULT_GROUPS, 'studio\\artist': ['users', 'restricted']}, DEFAULT_GROUPS, libraries)
 
     def plugin(self):

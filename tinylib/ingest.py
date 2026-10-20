@@ -1,6 +1,12 @@
 """Create reviewable job manifests and submit them to Deadline 10.4."""
 import copy
+import datetime
 import re
+import os
+import queue
+import threading
+import time
+import tempfile
 import subprocess
 import uuid
 from pathlib import Path
@@ -11,6 +17,48 @@ from .asset_types import (SCHEMA_VERSION, ASSET_TYPES, canonical_type, default_m
                           validate_representation, relative_paths)
 
 
+class MultipleFootageSources(ValueError):
+    def __init__(self, sources):
+        self.sources = tuple(sources)
+        super().__init__('The folder contains multiple Footage sources; choose one file from the required sequence or container.')
+
+
+def discover_footage_sources(folder, settings=None, include_singles=False):
+    """Find each sequence/container once, recursively, without scanning per frame."""
+    path = Path(folder)
+    if not path.is_dir():
+        raise ValueError('Source folder is unavailable: ' + str(folder))
+    allowed = representation('footage', 'main', settings)['extensions']
+    files = sorted(item for item in path.rglob('*')
+                   if item.is_file() and item.suffix.lower().lstrip('.') in allowed)
+    sequences, containers, singles = [], [], []
+    container_extensions = extension_groups(settings)['extensions_footage_containers']
+    image_groups = {}
+    for item in files:
+        if item.suffix.lower().lstrip('.') in container_extensions:
+            containers.append(str(item))
+            continue
+        match = re.match(r'^(.*?)(\d+)(\.[^.]+)$', item.name)
+        if not match:
+            singles.append(str(item))
+            continue
+        key = (item.parent, match[1], len(match[2]), match[3])
+        image_groups.setdefault(key, []).append((int(match[2]), item))
+    for (parent, prefix, padding, suffix), members in image_groups.items():
+        if len(members) < 2:
+            singles.append(str(members[0][1]))
+            continue
+        frames = sorted(frame for frame, _ in members)
+        if frames != list(range(frames[0], frames[-1] + 1)):
+            raise ValueError('Sequence has missing frames in %s; supply an explicit contiguous range.' % parent)
+        pattern = parent / (prefix + '#' * padding + suffix)
+        sequences.append('%s %s-%s' % (pattern, frames[0], frames[-1]))
+    candidates = sequences + containers
+    if not candidates and include_singles:
+        candidates = singles
+    return candidates
+
+
 def prepare_source(value, kind, settings=None):
     """Normalize a browsed/dropped main source and validate it immediately."""
     path = Path(value)
@@ -18,24 +66,11 @@ def prepare_source(value, kind, settings=None):
     if path.is_dir() and kind != 'folder':
         if kind != 'footage':
             raise ValueError('%s requires a file; choose Folder to ingest a directory.' % ASSET_TYPES[kind]['label'])
-        allowed = representation('footage', 'main', settings)['extensions']
-        files = sorted(item for item in path.iterdir()
-                       if item.is_file() and item.suffix.lower().lstrip('.') in allowed)
-        sequences, containers, singles = [], [], []
-        for item in files:
-            if item.suffix.lower().lstrip('.') in extension_groups(settings)['extensions_footage_containers']:
-                candidates = containers
-                candidate = str(item)
-            else:
-                candidate = detect_sequence(item)
-                candidates = sequences if split_sequence(candidate)[1] is not None else singles
-            if candidate not in candidates:
-                candidates.append(candidate)
-        candidates = sequences + containers if sequences or containers else singles
+        candidates = discover_footage_sources(path, settings, include_singles=True)
         if not candidates:
             raise ValueError('The folder contains no supported Footage files.')
         if len(candidates) != 1:
-            raise ValueError('The folder contains multiple Footage sources; choose one file from the required sequence or container.')
+            raise MultipleFootageSources(candidates)
         value = candidates[0]
     elif path.is_file() and kind == 'footage':
         extension = path.suffix.lower().lstrip('.')
@@ -85,10 +120,6 @@ def make_manifest(settings, library, name, category, source, tags, colorspace,
     if kind not in ASSET_TYPES:
         raise ValueError('Unknown asset type: ' + kind)
     validate_representation(kind, 'main', source, settings)
-    if kind == 'folder':
-        files = []
-    else:
-        files = sequence_files(source)
     if kind == 'still' and first is not None:
         raise ValueError('A Still must contain one image; choose Footage for an image sequence.')
     if kind == 'footage':
@@ -118,8 +149,6 @@ def make_manifest(settings, library, name, category, source, tags, colorspace,
             raise ValueError('Generate is only available for Still and Footage previews; supply ' + key + '.')
     if highres:
         validate_representation(kind, 'highres', highres, settings)
-        if kind != 'folder':
-            sequence_files(highres)
         high_pattern, high_first, high_last = split_sequence(highres)
         highres = str(Path(high_pattern).resolve()) + (' %s-%s' % (high_first, high_last) if high_first is not None else '')
     if any(v.get('mode') == 'generate' for v in media.values()):
@@ -140,11 +169,49 @@ def make_manifest(settings, library, name, category, source, tags, colorspace,
         'source': str(Path(pattern).resolve()) + (' %s-%s' % (first, last) if first is not None else ''),
         'kind': kind, 'tags': sorted(set(t.strip().lower() for t in tags if t.strip())),
         'colorspace': colorspace.strip(), 'fps': float(fps), 'highres': highres, 'metadata': metadata,
+        'ingest_user': access.identity, 'ingest_date': datetime.datetime.now().strftime('%Y%m%d'),
         'extension_groups': extension_groups(settings),
         'media': media, 'preview_source': preview_source,
         'profile': copy.deepcopy(settings.get('profiles', {}).get(profile, {})),
         'tools': copy.deepcopy(settings.get('tools', {}))
     }
+
+
+def make_folder_manifests(settings, library, category, folder, colorspace, profile,
+                          preview_source='main', progress=None):
+    """Prepare all folder jobs before submitting any of them."""
+    from .metadata_scan import scan_source_metadata
+    report = progress or (lambda message: None)
+    report('Discovering footage sequences and containers...')
+    sources = discover_footage_sources(folder, settings)
+    if not sources:
+        raise ValueError('The folder contains no supported footage sequences or containers.')
+    names = {}
+    for source in sources:
+        name = clean_asset_name(source)
+        if name.casefold() in names:
+            raise ValueError('Duplicate automatic asset name %s for %s and %s. '
+                             'Rename one source before submitting the folder.' % (name, names[name.casefold()], source))
+        names[name.casefold()] = source
+    jobs = []
+    for index, source in enumerate(sources, 1):
+        name = clean_asset_name(source)
+        report('Scanning metadata %d/%d: %s' % (index, len(sources), name))
+        try:
+            metadata = scan_source_metadata(source, settings)
+            fps = metadata.get('frame_rate')
+            if fps is None or not 0 < float(fps) <= 240:
+                raise ValueError('No valid FPS in source metadata. Folder ingest requires embedded FPS.')
+            jobs.append(make_manifest(settings, library, name, category, source, keywords_from_name(name),
+                                      colorspace, profile,
+                                      {key: {'mode': 'generate', 'path': ''}
+                                       for key in ('proxy', 'thumb', 'filmstrip')},
+                                      fps=fps, highres='', preview_source=preview_source,
+                                      kind='footage', metadata=metadata))
+        except Exception as error:
+            raise ValueError('Cannot prepare %s (%s): %s. No folder jobs have been submitted.'
+                             % (name, source, error)) from error
+    return jobs
 
 
 def save_manifest(manifest, folder):
@@ -153,10 +220,65 @@ def save_manifest(manifest, folder):
     return path
 
 
-def submit_deadline(manifest, settings):
+def _deadline_confirmation(command, report, timeout=60):
+    """Read confirmation live; Deadline may take time to exit after accepting a job."""
+    started = time.monotonic()
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               text=True, errors='replace',
+                               creationflags=0x08000000 if os.name == 'nt' else 0)
+    events = queue.Queue()
+
+    def read_output():
+        try:
+            for line in process.stdout:
+                events.put(line)
+        finally:
+            process.stdout.close()
+            events.put(None)
+            process.wait()
+
+    # Keep draining/reaping the process if success arrives before process exit.
+    threading.Thread(target=read_output, daemon=True).start()
+    output, job_id, success, latest = [], None, False, 'Connecting to Deadline'
+    next_update = 0
+    while True:
+        elapsed = time.monotonic() - started
+        try:
+            line = events.get(timeout=.25)
+        except queue.Empty:
+            line = ''
+        if line is None:
+            code = process.wait(timeout=max(1, timeout - elapsed))
+            if not code and job_id:
+                return job_id, ''.join(output), elapsed
+            raise RuntimeError('Deadline did not confirm submission. Inspect Monitor before retrying.\n' + ''.join(output))
+        if line:
+            output.append(line)
+            latest = line.strip() or latest
+            match = re.search(r'JobID=([^\s]+)', line)
+            if match:
+                job_id = match[1]
+            success = success or bool(re.search(r'Result=Success\b', line, re.IGNORECASE))
+            if job_id and success:
+                return job_id, ''.join(output), time.monotonic() - started
+        if elapsed >= next_update:
+            report('Deadline submission (%.0f s): %s' % (elapsed, latest))
+            next_update = elapsed + 1
+        if elapsed >= timeout:
+            if process.poll() is None:
+                process.kill()
+            raise RuntimeError('Deadline did not confirm submission within %g seconds. '
+                               'The job may already exist; inspect Monitor before retrying.\n%s'
+                               % (timeout, ''.join(output)))
+
+
+def submit_deadline(manifest, settings, progress=None):
+    report = progress or (lambda message: None)
+    report('Checking ingest permissions...')
     access = settings.get('_access') or AccessControl(settings)
     access.refresh()
     access.require(manifest['library']['root'], 'ingest')
+    report('Checking Deadline worker and spool paths...')
     config = settings.get('deadline', {})
     script = config.get('worker_script', '')
     spool = config.get('spool_root', '')
@@ -166,6 +288,7 @@ def submit_deadline(manifest, settings):
     for value in (script, spool, manifest['name'], config.get('pool', ''), config.get('group', ''), config.get('python_version', '3.10')):
         if '\n' in str(value) or '\r' in str(value) or '"' in str(value):
             raise ValueError('Invalid character in Deadline configuration.')
+    report('Writing job files to the Deadline spool...')
     path = save_manifest(manifest, spool)
     job = path.with_suffix('.job')
     plugin = path.with_suffix('.plugin')
@@ -177,11 +300,18 @@ def submit_deadline(manifest, settings):
     plugin.write_text('\n'.join([
         'Version=' + config.get('python_version', '3.10'), 'ScriptFile=' + script,
         'Arguments="' + str(path) + '"', 'SingleFramesOnly=False', '']), encoding='utf-8')
-    result = subprocess.run([config.get('command') or 'deadlinecommand', str(job), str(plugin)],
-                            capture_output=True, text=True, timeout=60)
-    output = result.stdout + result.stderr
-    match = re.search(r'JobID=([^\s]+)', output)
-    if result.returncode or not match:
-        raise RuntimeError('Deadline did not confirm submission. Inspect Monitor before retrying.\n' + output)
-    atomic_json(path.with_suffix('.submission.json'), {'deadline_job_id': match[1], 'manifest': str(path)})
-    return match[1], path
+    report('Waiting for Deadline to confirm submission...')
+    # Deadline only needs these tiny descriptor files locally. The manifest stays
+    # on the shared spool so farm workers can read it.
+    with tempfile.TemporaryDirectory(prefix='tinylib-submit-') as local:
+        local_job = Path(local) / job.name
+        local_plugin = Path(local) / plugin.name
+        local_job.write_bytes(job.read_bytes())
+        local_plugin.write_bytes(plugin.read_bytes())
+        identifier, output, seconds = _deadline_confirmation(
+            [config.get('command') or 'deadlinecommand', str(local_job), str(local_plugin)],
+            report, timeout=60)
+    report('Saving Deadline confirmation...')
+    atomic_json(path.with_suffix('.submission.json'), {'deadline_job_id': identifier, 'manifest': str(path),
+                                                      'confirmation_seconds': seconds, 'output': output})
+    return identifier, path

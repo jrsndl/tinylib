@@ -175,4 +175,41 @@ assert window.direction == 0
 controller.stop()
 pump()
 assert not errors
+# Ctrl+C copies the proxy at native resolution, without the display overlay.
+large_media = output / 'clipboard full resolution.mp4'
+subprocess.run([ffmpeg, '-y', '-v', 'error', '-f', 'lavfi', '-i',
+                'testsrc2=size=1280x720:rate=24', '-frames:v', '12',
+                '-c:v', 'libx264', '-g', '12', '-pix_fmt', 'yuv420p', str(large_media)], check=True)
+expected = subprocess.run([ffmpeg, '-v', 'error', '-i', str(large_media),
+                           '-vf', 'select=eq(n\\,5)', '-frames:v', '1', '-pix_fmt', 'rgb24',
+                           '-f', 'rawvideo', 'pipe:1'], capture_output=True, check=True).stdout
+controller.play({'name': 'Clipboard test', 'proxy': str(large_media), 'kind': 'footage', 'first': 1001})
+wait(lambda: bool(controller.windows), 'clipboard player launch')
+window = next(iter(controller.windows))
+wait(lambda: not window.picture.isNull(), 'clipboard player initial image')
+key(QtCore.Qt.Key_K)
+window.seek(5)
+wait(lambda: not window.pending, 'clipboard seek')
+assert window.picture.width() == 960 and window.overlay
+clipboard = app.clipboard()
+clipboard.setText('Not copied during playback')
+key(QtCore.Qt.Key_L)
+QTest.keyClick(window, QtCore.Qt.Key_C, QtCore.Qt.ControlModifier)
+assert clipboard.text() == 'Not copied during playback'
+key(QtCore.Qt.Key_K)
+window.seek(5)
+wait(lambda: not window.pending, 'stopped clipboard seek')
+QTest.keyClick(window, QtCore.Qt.Key_C, QtCore.Qt.ControlModifier)
+wait(lambda: not clipboard.image().isNull(), 'native-resolution clipboard copy')
+copied = clipboard.image().convertToFormat(QtGui.QImage.Format_RGB888)
+assert (copied.width(), copied.height()) == (1280, 720)
+bits = copied.constBits()
+if hasattr(bits, 'setsize'):
+    bits.setsize(1280 * 720 * 3)
+assert hashlib.sha256(bytes(bits)[:1280 * 720 * 3]).digest() == hashlib.sha256(expected).digest()
+assert window.current == 5 and window.direction == 0
+controller.stop()
+pump()
+assert not controller.windows
+
 print('Interactive player passed:', QtCore.__name__, 'exact frames, autoplay, JKL, speed reset, steps, overlay, scrub, loop on/off, stills, cleanup')

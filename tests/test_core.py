@@ -114,10 +114,7 @@ class LibraryTests(unittest.TestCase):
         job = dict(job_id='jobid', name='Nice asset', library={'root': str(self.root)})
         settings = {'deadline': {'worker_script': str(worker), 'spool_root': str(self.root)}}
         settings['_access'] = AccessControl({'_config_path': str(self.root / 'studio.json')}, identity='test', persist=False)
-        with patch('tinylib.ingest.subprocess.run') as run:
-            run.return_value.returncode = 0
-            run.return_value.stdout = 'Result=Success\nJobID=123abc\n'
-            run.return_value.stderr = ''
+        with patch('tinylib.ingest._deadline_confirmation', return_value=('123abc', 'Result=Success\nJobID=123abc\n', .5)) as run:
             identifier, path = submit_deadline(job, settings)
             self.assertEqual(identifier, '123abc')
             self.assertIn('ScriptFile=' + str(worker), path.with_suffix('.plugin').read_text())

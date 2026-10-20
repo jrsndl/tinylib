@@ -25,6 +25,56 @@ class FilterTests(unittest.TestCase):
         self.assertFalse(accepts(value, stars=('>', 4), rating=4))
         self.assertTrue(accepts(value, stars=('=', 0), rating=0))
 
+    def test_json_field_filters_combine_with_plain_search(self):
+        value = asset()
+        value.update(acquire_price='usd 25.50', ingest_note='Shot in slow motion')
+        self.assertTrue(accepts(value, 'fire {acquire price}:usd'))
+        self.assertTrue(accepts(value, 'FIRE {ACQUIRE_PRICE}:USD'))
+        self.assertFalse(accepts(value, 'rain {acquire price}:usd'))
+        self.assertFalse(accepts(value, 'fire {acquire price}:eur'))
+        self.assertTrue(accepts(value, '{acquire price}:usd {ingest note}:"slow motion"'))
+        self.assertTrue(accepts(value, 'fire -{acquire price}:eur'))
+        self.assertFalse(accepts(value, 'fire -{acquire price}:usd'))
+        self.assertFalse(accepts(value, '{missing field}:usd'))
+        self.assertTrue(accepts(value, 'fire {acquire price}:eur', invert=True))
+        self.assertFalse(accepts(value, 'fire {acquire price}:usd', invert=True))
+        self.assertTrue(accepts(value, 'fire {acquire price}:usd tag:smoke -night'))
+
+    def test_field_filters_search_nested_json_and_non_text_values(self):
+        value = asset()
+        value['metadata'].update(is_raw=True, extras=[{'camera_model': 'ARRI Alexa'}])
+        self.assertTrue(accepts(value, '{metadata.width}:2048 {is raw}:true'))
+        self.assertTrue(accepts(value, '{width}:2048 {camera model}:alexa'))
+        self.assertTrue(accepts(value, '{metadata.extras.camera model}:arri'))
+        self.assertTrue(accepts(value, '{tags}:smoke'))
+        self.assertFalse(accepts(value, '{metadata.width}:1920'))
+        # Incomplete clauses remain ordinary search text and never raise.
+        self.assertFalse(accepts(value, 'fire {acquire price}:'))
+        self.assertFalse(accepts(value, 'fire {ingest note}:"unfinished'))
+
+    def test_exclamation_excludes_words_and_quoted_phrases(self):
+        value = asset(name='Big Burst Fire')
+        self.assertFalse(accepts(value, '!burst'))
+        self.assertTrue(accepts(value, '!rain'))
+        self.assertFalse(accepts(value, '!"big burst"'))
+        self.assertTrue(accepts(value, '!"small burst"'))
+        self.assertFalse(accepts(value, 'fire !smoke'))  # Keywords count too.
+        self.assertTrue(accepts(value, 'fire !rain !"small burst"'))
+        self.assertTrue(accepts(value, '!burst', invert=True))
+
+    def test_exclamation_excludes_json_field_values(self):
+        value = asset()
+        value['ingest_note'] = 'Big burst at night'
+        self.assertFalse(accepts(value, '{ingest_note}!burst'))
+        self.assertFalse(accepts(value, '{INGEST NOTE}!"big burst"'))
+        self.assertTrue(accepts(value, '{ingest note}!rain'))
+        self.assertTrue(accepts(value, '{ingest note}!"small burst"'))
+        self.assertTrue(accepts(value, '{missing field}!burst'))
+        self.assertTrue(accepts(value, 'fire !rain {ingest note}!day {metadata.width}:2048'))
+        self.assertFalse(accepts(value, 'fire {ingest note}:night {ingest note}!burst'))
+        self.assertFalse(accepts(value, '{metadata.width}!2048'))
+        self.assertTrue(accepts(value, '{metadata.width}!1920'))
+
     def test_stills_and_missing_metadata(self):
         value = asset()
         value['metadata'] = {}

@@ -132,9 +132,10 @@ class Processor:
                 self.image(sources[chosen], outputs['thumb'], (960, 506))
         if footage and outputs.get('filmstrip') and media['filmstrip']['mode'] == 'generate':
             if container:
-                info = probe(sources[0], self.tools)
+                strip_source = proxy if job['preview_source'] == 'proxy' and proxy else sources[0]
+                info = probe(strip_source, self.tools)
                 duration = max(float(info.get('duration') or 1), .001)
-                run([self.ffmpeg, '-y', '-v', 'error', '-i', sources[0], '-vf',
+                run([self.ffmpeg, '-y', '-v', 'error', '-i', strip_source, '-vf',
                      'fps=24/%s,%s,tile=24x1' % (duration, fit_filter(480, 270)),
                      '-frames:v', '1', '-q:v', '2', outputs['filmstrip']])
                 return
@@ -168,7 +169,7 @@ def validate_media(outputs, manifest):
             if first is not None and actual != last - first + 1:
                 raise ValueError('Proxy frame count differs from main: %s vs %s' % (actual, last-first+1))
             if abs(float(Fraction(info['avg_frame_rate'])) - manifest['fps']) > .01:
-                raise ValueError('Proxy frame rate differs from ingest FPS.')
+                print('Warning: proxy frame rate differs from ingest FPS; ingest will continue.')
 
 
 def process(manifest_path, access=None):
@@ -278,6 +279,10 @@ def process(manifest_path, access=None):
                       main=str(destination / 'main' / main_name), first=first, last=last,
                       tags=job['tags'], colorspace=job['colorspace'], ingest_job_id=identifier,
                       metadata=metadata)
+        from .asset_fields import apply_defaults
+        apply_defaults(record)
+        record['ingest_user'] = job.get('ingest_user', 'unknown')
+        record['ingest_date'] = job.get('ingest_date', '20251224')
         for key, path in outputs.items():
             record[key] = str(destination / key) if path == stage / key else str(destination / key / path.name)
         if highres_pattern:

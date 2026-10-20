@@ -29,8 +29,13 @@ def root_key(root):
 
 
 def default_permissions():
-    return {'view': ['managers', 'users'], 'ingest': ['managers'],
-            'actions': {action: ['managers', 'users'] for action in ('nuke.read', 'nuke.highres', 'clipboard.paths')}}
+    return {'view': ['users', 'managers', 'admins'], 'ingest': ['admins'],
+            'edit': ['managers', 'admins'], 'actions': ['users', 'managers', 'admins'],
+            'version_fields': ['admins'], 'ingest_fields': ['managers', 'admins'],
+            'acquire_fields': ['managers', 'admins']}
+
+
+CAPABILITIES = tuple(default_permissions())
 
 
 class AccessControl:
@@ -53,9 +58,11 @@ class AccessControl:
         self.refresh()
 
     def _bootstrap(self):
-        self.data['access'] = {'groups': list(DEFAULT_GROUPS), 'users': {self.identity: list(DEFAULT_GROUPS)}}
+        defaults = copy.deepcopy(self.data.get('access', {}).get('defaults', {}))
+        self.data['access'] = {'groups': list(DEFAULT_GROUPS), 'users': {self.identity: list(DEFAULT_GROUPS)},
+                               'defaults': defaults}
         for library in self.data.get('libraries', []):
-            library.setdefault('permissions', default_permissions())
+            library.setdefault('permissions', {})
 
     def refresh(self):
         self.groups = set()
@@ -81,16 +88,30 @@ class AccessControl:
                 return library.get('permissions', {})
         return {}
 
+    def defaults(self):
+        return dict(default_permissions(), **self.data.get('access', {}).get('defaults', {}))
+
+    def field_allowed(self, root, key):
+        from .asset_fields import field_capability
+        capability = field_capability(key)
+        return capability is None or self.can(root, capability)
+
     def can(self, root, capability, action=None):
-        if capability not in ('view', 'ingest', 'action'):
+        capability = 'actions' if capability == 'action' else capability
+        if capability not in CAPABILITIES:
             raise ValueError('Unknown library capability.')
         if self.is_admin:
             return True
+        # Unregistered roots must never inherit studio grants.
+        registered = any(root_key(self.path.parent / os.path.expandvars(item['root'])) == root_key(root)
+                         for item in self.data.get('libraries', []))
+        if not registered:
+            return False
         policy = self.policy(root)
-        if capability == 'action':
-            grants = policy.get('actions', {}).get(action, [])
-        else:
-            grants = policy.get(capability, [])
+        grants = policy.get(capability, self.defaults().get(capability, []))
+        # Old per-action mappings no longer grant individual actions.
+        if capability == 'actions' and isinstance(grants, dict):
+            grants = self.defaults()['actions']
         if not isinstance(grants, list):
             return False
         return bool(self.groups.intersection(grants))
@@ -100,7 +121,7 @@ class AccessControl:
             raise PermissionError('Your groups do not permit %s%s for this library.' %
                                   (capability, ' ' + action if action else ''))
 
-    def save(self, users, groups, libraries):
+    def save(self, users, groups, libraries, defaults=None):
         def update():
             self.refresh()
             if not self.is_admin:
@@ -113,13 +134,17 @@ class AccessControl:
                     raise ValueError('Each user needs an identity and one or more valid groups.')
             if not any('admins' in memberships for memberships in users.values()):
                 raise ValueError('At least one administrator must remain.')
+            policies = [defaults if defaults is not None else self.defaults()]
             for library in libraries:
                 policy = library.get('permissions', {})
-                grants = [policy.get('view', []), policy.get('ingest', [])] + list(policy.get('actions', {}).values())
+                policies.append(policy)
+            for policy in policies:
+                grants = list(policy.values())
                 if any(not isinstance(grant, list) or not set(grant).issubset(groups_set) for grant in grants):
                     raise ValueError('Library permissions reference unknown groups.')
             self.data['access'] = {'groups': sorted(groups_set),
-                                   'users': {key.casefold(): value for key, value in users.items()}}
+                                   'users': {key.casefold(): value for key, value in users.items()},
+                                   'defaults': copy.deepcopy(defaults if defaults is not None else self.defaults())}
             self.data['libraries'] = copy.deepcopy(libraries)
             if self.persist:
                 atomic_json(self.path, self.data)

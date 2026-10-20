@@ -164,3 +164,138 @@ def crosscheck_library(root, name, output_dir=None, progress=None, cancelled=Non
     return {'log_path': str(log_path), 'records': len(records),
             'missing_records': len(missing_records), 'missing_paths': missing_paths,
             'folders': len(folders), 'orphan_folders': len(orphan_folders)}
+
+
+def sort_library(settings, access, library, override=False, progress=None):
+    """Persist category/name order while holding the standard edit and write locks."""
+    from .asset_edit import writable_library
+    from .edit_lock import acquire_edit_lock, assert_edit_write_allowed, release_edit_lock
+    from .library import atomic_json, library_lock
+    report = progress or (lambda message: None)
+    report('Checking library write access...')
+    access.refresh()
+    if not access.is_admin:
+        raise PermissionError('Library tools require an administrator account.')
+    config = writable_library(settings, access, {'library_root': library['root']})
+    report('Acquiring library edit lock...')
+    handle = acquire_edit_lock(config['root'], access.identity, override=override)
+    try:
+        with library_lock(config['root']):
+            assert_edit_write_allowed(config['root'], handle['token'])
+            report('Reading latest library database...')
+            database = Path(config['root']) / DATABASE_FILENAME
+            document = read_json(database)
+            if document.get('schema_version') != 3 or not isinstance(document.get('assets'), list):
+                raise ValueError('Library Sort requires a schema_version 3 tinylib_data.json.')
+            records = document['assets']
+            if any(not isinstance(record, dict) or not isinstance(record.get('name'), str)
+                   or not isinstance(record.get('category'), str) for record in records):
+                raise ValueError('Every asset must have a category and name to sort the library.')
+            report('Sorting %d assets alphabetically...' % len(records))
+            ordered = sorted(records, key=lambda record: (
+                record['category'].replace('\\', '/').casefold(), record['name'].casefold()))
+            changed = records != ordered
+            if changed:
+                document['assets'] = ordered
+                report('Saving sorted library database...')
+                atomic_json(database, document)
+            return {'assets': len(records), 'changed': changed}
+    finally:
+        release_edit_lock(handle)
+
+
+def create_new_library(settings, access, name, root, template_root=None, read_only=None, progress=None):
+    """Initialize an empty database and register it in studio/security config."""
+    import copy
+    from contextlib import ExitStack
+    from .access import root_key
+    from .asset_types import SCHEMA_VERSION
+    from .library import atomic_json, library_lock
+    from .edit_lock import assert_edit_write_allowed
+    report = progress or (lambda message: None)
+    access.refresh()
+    if not access.is_admin:
+        raise PermissionError('Library tools require an administrator account.')
+    name, root_text = name.strip(), str(root).strip()
+    if not name or not root_text:
+        raise ValueError('Enter a library name and root folder.')
+    root = Path(os.path.expandvars(root_text)).resolve()
+    config_path = Path(settings['_config_path']).resolve()
+    security_path = access.path.resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    database = root / DATABASE_FILENAME
+
+    def entry_root(entry, path):
+        value = Path(os.path.expandvars(entry['root']))
+        return root_key((value if value.is_absolute() else path.parent / value).resolve())
+
+    report('Locking library and studio configuration...')
+    folders = {root_key(root): root, root_key(config_path.parent): config_path.parent}
+    if access.persist:
+        folders[root_key(security_path.parent)] = security_path.parent
+    with ExitStack() as stack:
+        for _, folder in sorted(folders.items()):
+            stack.enter_context(library_lock(folder))
+        access.refresh()
+        if not access.is_admin:
+            raise PermissionError('Only admins can create libraries.')
+        assert_edit_write_allowed(root)
+        if database.exists():
+            raise ValueError('This folder already contains ' + DATABASE_FILENAME + '. Choose a different root.')
+        document = read_json(config_path)
+        security = document if config_path == security_path and access.persist else copy.deepcopy(access.data)
+        for data, path in ((document, config_path), (security, security_path)):
+            for library in data.get('libraries', []):
+                if entry_root(library, path) == root_key(root):
+                    raise ValueError('This root is already registered as a library.')
+                if library['name'].strip().casefold() == name.casefold():
+                    raise ValueError('A library with this name already exists.')
+        if template_root:
+            template = next((item for item in document.get('libraries', [])
+                             if entry_root(item, config_path) == root_key(Path(template_root).resolve())), None)
+            if template is None:
+                raise ValueError('The settings source library no longer exists.')
+            library = copy.deepcopy(template)
+            policy = next((item for item in security.get('libraries', [])
+                           if entry_root(item, security_path) == root_key(Path(template_root).resolve())), None)
+            if policy is not None:
+                library['permissions'] = copy.deepcopy(policy.get('permissions', {}))
+        else:
+            library = copy.deepcopy(document.get('library_defaults', {}))
+            library.setdefault('read_only', False)
+            library.setdefault('permissions', {})  # Inherit studio permission defaults.
+        library.update(name=name, root=str(root))
+        if read_only is not None:
+            library['read_only'] = bool(read_only)
+        before_config = copy.deepcopy(document)
+        before_security = copy.deepcopy(security)
+        document.setdefault('libraries', []).append(copy.deepcopy(library))
+        if security is not document:
+            security.setdefault('libraries', []).append(copy.deepcopy(library))
+        written = []
+        try:
+            report('Creating empty library database...')
+            atomic_json(database, {'schema_version': 3, 'asset_type_schema_version': SCHEMA_VERSION, 'assets': []})
+            report('Registering new library...')
+            atomic_json(config_path, document)
+            written.append((config_path, before_config))
+            if access.persist and security_path != config_path:
+                atomic_json(security_path, security)
+                written.append((security_path, before_security))
+            if not access.persist:
+                access._memory = copy.deepcopy(security)
+            access.refresh()
+        except Exception as error:
+            rollback_errors = []
+            for path, original in reversed(written):
+                try:
+                    atomic_json(path, original)
+                except Exception as rollback_error:
+                    rollback_errors.append(str(rollback_error))
+            if not rollback_errors and database.exists():
+                database.unlink()
+            if rollback_errors:
+                raise RuntimeError('Library registration failed: %s. Configuration rollback failed: %s'
+                                   % (error, '; '.join(rollback_errors))) from error
+            raise
+        return library

@@ -8,6 +8,7 @@ import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from .search import parse_query, matches_fields
 
 DATABASE_FILENAME = 'tinylib_data.json'
 
@@ -145,7 +146,7 @@ class Library:
                                                        self.name, self.legacy_roots)
                 if cache_path.is_file():
                     cached = read_json(cache_path)
-                    if cached.get('index_cache_version') == 1:
+                    if cached.get('index_cache_version') == 2:
                         self.assets = cached['assets']
                         self.index_cache_hit = True
                         return self.assets
@@ -187,20 +188,22 @@ class Library:
                 cache_path = None
         if cache_path:
             try:
-                atomic_json(cache_path, {'index_cache_version': 1, 'assets': self.assets})
+                atomic_json(cache_path, {'index_cache_version': 2, 'assets': self.assets})
             except OSError:
                 pass
         return self.assets
 
-    def normalize(self, record):
+    def normalize(self, record, discover_media=True):
         from .asset_types import canonical_type
+        from .asset_fields import apply_defaults
         result = copy.deepcopy(record)
+        apply_defaults(result)
         for key in ('main', 'thumb', 'proxy', 'filmstrip', 'highres', 'scene'):
             result[key] = self.resolve(result.get(key, ''))
         asset_dir = Path(result['main']).parent if result.get('kind') == 'folder' else Path(result['main']).parent.parent
         missing = [key for key in ('thumb', 'proxy', 'filmstrip', 'highres', 'scene') if not result[key]]
         folders = {}
-        if missing:
+        if missing and discover_media:
             try:
                 folders = {item.name.casefold(): item for item in asset_dir.iterdir() if item.is_dir()}
             except OSError:
@@ -253,7 +256,9 @@ class Library:
         return records
 
     def portable(self, record):
+        from .asset_fields import apply_defaults
         result = copy.deepcopy(record)
+        apply_defaults(result)
         for key in list(result):
             if key.startswith('_'):
                 result.pop(key)
@@ -279,6 +284,10 @@ class Library:
         with library_lock(self.root):
             from .edit_lock import assert_edit_write_allowed
             assert_edit_write_allowed(self.root, edit_token)
+            database = self.root / DATABASE_FILENAME
+            document = read_json(database) if database.exists() else {}
+            if document.get('schema_version') == 3:
+                return self._update_json_assets(document, edits)
             self.load(use_cache=False)
             updated = []
             changed = False
@@ -310,6 +319,43 @@ class Library:
                             assets=[self.portable(asset) for asset in self.assets])
             atomic_json(database, document)
             return updated
+
+    def _update_json_assets(self, document, edits):
+        """Patch current JSON records without probing unrelated media folders.
+
+        The caller holds both the write lock and the validated edit token.
+        """
+        from .asset_edit import validate_changes
+        from .asset_fields import apply_defaults
+        records = document['assets']
+        lookup = {}
+        for record in records:
+            lookup.setdefault((record['id'], self.resolve(record.get('main', ''))), []).append(record)
+        updated, changed = [], False
+        for original, changes in edits:
+            matches = lookup.get((original['id'], original['main']), [])
+            if len(matches) != 1:
+                raise ValueError('Asset changed or disappeared. Refresh the library before editing.')
+            record = matches[0]
+            current = self.normalize(record, discover_media=False)
+            for field in changes:
+                if current.get(field) != original.get(field):
+                    raise ValueError('Another user changed %s. Refresh before saving.' % field)
+            # Retain already-discovered preview paths in the returned GUI record.
+            for role in ('thumb', 'proxy', 'filmstrip', 'highres', 'scene'):
+                if not current.get(role):
+                    current[role] = original.get(role, '')
+            if changes:
+                current.update(copy.deepcopy(changes))
+                validate_changes(current, {})
+                record.update(copy.deepcopy(changes))
+                apply_defaults(record)
+                changed = True
+            updated.append(current)
+        if changed:
+            document['asset_type_schema_version'] = 1
+            atomic_json(self.root / DATABASE_FILENAME, document)
+        return updated
 
     def publish(self, record, staging=None, edit_token=None):
         """Reread under lock, preserve legacy DB backup, publish completed assets only."""
@@ -349,12 +395,15 @@ def matches(asset, query='', category='', kind='', tag=''):
     if tag and tag.casefold() not in tags:
         return False
     haystack = ' '.join([asset.get('name', ''), asset.get('category', ''), asset.get('library', ''), *tags]).casefold()
+    query, field_clauses = parse_query(query)
+    if not matches_fields(asset, field_clauses):
+        return False
     try:
         tokens = shlex.split(query)
     except ValueError:
         tokens = query.split()
     for token in tokens:
-        excluded = token.startswith('-') and len(token) > 1
+        excluded = token.startswith(('-', '!')) and len(token) > 1
         term = token[1:] if excluded else token
         found = term[4:].casefold() in tags if term.lower().startswith('tag:') else term.casefold() in haystack
         if found == excluded:

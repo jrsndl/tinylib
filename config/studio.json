@@ -81,6 +81,36 @@
       "users",
       "restricted"
     ],
-    "users": {}
+    "users": {},
+    "defaults": {
+      "view": [
+        "users",
+        "managers",
+        "admins"
+      ],
+      "ingest": [
+        "admins"
+      ],
+      "edit": [
+        "managers",
+        "admins"
+      ],
+      "actions": [
+        "users",
+        "managers",
+        "admins"
+      ],
+      "version_fields": [
+        "admins"
+      ],
+      "ingest_fields": [
+        "managers",
+        "admins"
+      ],
+      "acquire_fields": [
+        "managers",
+        "admins"
+      ]
+    }
   }
 }

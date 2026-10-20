@@ -81,6 +81,9 @@ class AssetTypeTests(unittest.TestCase):
                             kind='model', metadata=metadata)
         self.assertEqual(job['kind'], 'model')
         self.assertEqual(job['metadata']['faces'], 123)
+        self.assertEqual(job['ingest_user'], self.settings['_access'].identity)
+        from datetime import datetime
+        self.assertEqual(job['ingest_date'], datetime.now().strftime('%Y%m%d'))
         with self.assertRaises(ValueError):
             make_manifest(self.settings, self.library, 'Tree2', 'models', str(source), [], '',
                           'preview', {'thumb': {'mode': 'generate', 'path': ''}}, kind='model')
@@ -96,9 +99,42 @@ class AssetTypeTests(unittest.TestCase):
         atomic_json(path, job)
         record = process(path, access=self.settings['_access'])
         self.assertEqual(record['kind'], 'model')
+        self.assertEqual(record['ingest_user'], job['ingest_user'])
+        self.assertEqual(record['ingest_date'], job['ingest_date'])
+        from tinylib.asset_fields import DEFAULT_FIELDS
+        self.assertTrue(set(DEFAULT_FIELDS).issubset(record))
         self.assertEqual(record['metadata']['file_size_main'], len(b'model-data'))
         self.assertTrue((self.root / 'models/Rock/main/rock.obj').is_file())
         self.assertTrue((self.root / 'models/Rock/thumb/Rock.jpg').is_file())
+
+    def test_folder_source_finds_nested_sequence_and_ignores_other_files(self):
+        nested = self.root / 'sources' / 'shot' / 'main'
+        nested.mkdir(parents=True)
+        for frame in (1001, 1002, 1003):
+            (nested / ('smoke.%d.exr' % frame)).write_bytes(b'frame')
+        (self.root / 'sources' / 'notes.txt').write_text('Notes')
+        source = prepare_source(str(self.root / 'sources'), 'footage', self.settings)
+        self.assertEqual(source, str(nested / 'smoke.####.exr') + ' 1001-1003')
+
+    def test_recursive_folder_rejects_ambiguous_sources_and_missing_frames(self):
+        parent = self.root / 'sources'
+        for name in ('first', 'second'):
+            nested = parent / name
+            nested.mkdir(parents=True)
+            for frame in (1, 2):
+                (nested / ('plate.%04d.exr' % frame)).write_bytes(b'x')
+        with self.assertRaisesRegex(ValueError, 'multiple Footage sources'):
+            prepare_source(str(parent), 'footage', self.settings)
+        (parent / 'first' / 'plate.0002.exr').rename(parent / 'first' / 'plate.0003.exr')
+        with self.assertRaisesRegex(ValueError, 'missing frames'):
+            prepare_source(str(parent), 'footage', self.settings)
+
+    def test_recursive_folder_finds_nested_container(self):
+        nested = self.root / 'sources' / 'shot'
+        nested.mkdir(parents=True)
+        container = nested / 'clip.mp4'
+        container.write_bytes(b'container')
+        self.assertEqual(prepare_source(str(self.root / 'sources'), 'footage', self.settings), str(container))
 
     def test_folder_worker_copies_tree_and_records_relative_files(self):
         source = self.root / 'source-folder'
