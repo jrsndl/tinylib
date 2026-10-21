@@ -18,7 +18,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
-from .library import atomic_json, detect_sequence, safe_component, split_sequence
+from .library import atomic_json, detect_sequence, frame_path, safe_component, split_sequence
 from .access import AccessControl
 from .log import get_logger
 
@@ -34,14 +34,18 @@ class MultipleFootageSources(ValueError):
         super().__init__('The folder contains multiple Footage sources; choose one file from the required sequence or container.')
 
 
-def discover_footage_sources(folder, settings=None, include_singles=False):
-    """Find each sequence/container once, recursively, without scanning per frame."""
+def discover_media(folder, extensions, settings=None):
+    """Each sequence, container and single file under ``folder`` once, recursively.
+
+    Returns ``(sequences, containers, singles)`` as source strings
+    (``path/name.####.exr 1001-1100`` for a sequence). A numbered file without a
+    neighbour is a single file.
+    """
     path = Path(folder)
     if not path.is_dir():
         raise ValueError('Source folder is unavailable: ' + str(folder))
-    allowed = representation('footage', 'main', settings)['extensions']
     files = sorted(item for item in path.rglob('*')
-                   if item.is_file() and item.suffix.lower().lstrip('.') in allowed)
+                   if item.is_file() and item.suffix.lower().lstrip('.') in extensions)
     sequences, containers, singles = [], [], []
     container_extensions = extension_groups(settings)['extensions_footage_containers']
     image_groups = {}
@@ -64,6 +68,13 @@ def discover_footage_sources(folder, settings=None, include_singles=False):
             raise ValueError('Sequence has missing frames in %s; supply an explicit contiguous range.' % parent)
         pattern = parent / (prefix + '#' * padding + suffix)
         sequences.append('%s %s-%s' % (pattern, frames[0], frames[-1]))
+    return sequences, containers, singles
+
+
+def discover_footage_sources(folder, settings=None, include_singles=False):
+    """Find each sequence/container once, recursively, without scanning per frame."""
+    allowed = representation('footage', 'main', settings)['extensions']
+    sequences, containers, singles = discover_media(folder, allowed, settings)
     candidates = sequences + containers
     if not candidates and include_singles:
         candidates = singles
@@ -90,14 +101,122 @@ def prepare_source(value, kind, settings=None):
     return value
 
 
-def clean_asset_name(source):
+def clean_file_name(source):
+    """The file name without folder, extension, frame counter and the separator before it.
+
+    ``mains/assetA.1001.exr``, ``mains/assetA.####.exr 1001-1100`` and ``proxies/assetA.mp4``
+    all give ``assetA``. This is the name components are paired by.
+    """
     pattern, first, _ = split_sequence(source)
     path = Path(pattern)
     name = path.name if path.is_dir() else path.stem
-    if first is not None:
+    if first is not None or re.search(r'#+|%0?\d*d', name):
         name = re.sub(r'[._-]?(?:#+|%0?\d*d|\d+)$', '', name)
-    name = re.sub(r'_?v\d{3}', '', name, flags=re.IGNORECASE)
+    return name
+
+
+def clean_asset_name(source):
+    name = re.sub(r'_?v\d{3}', '', clean_file_name(source), flags=re.IGNORECASE)
     return name.strip('._- ') or 'asset'
+
+
+def source_file_name(source):
+    """The file name a pairing regex is matched against: a sequence's first frame."""
+    pattern, first, _ = split_sequence(source)
+    if first is not None:
+        pattern = frame_path(pattern, first)
+    return Path(pattern).name
+
+
+def category_for(category, source):
+    """The main category: a name, or ``{'parent': N}`` = the folder N levels above the main file.
+
+    For ``c:/ingest/fire/mains/assetA.####.exr`` level 1 is ``mains`` and level 2 ``fire``.
+    """
+    if not isinstance(category, dict):
+        return str(category or '').strip()
+    levels = int(category.get('parent', 1))
+    if not 1 <= levels <= 3:
+        raise ValueError('The category folder must be 1, 2 or 3 levels above the main file.')
+    parents = Path(split_sequence(source)[0]).parents
+    if levels > len(parents) - 1 or not parents[levels - 1].name:
+        raise ValueError('%s has no folder %d level(s) up for the category.' % (source, levels))
+    return parents[levels - 1].name
+
+
+PAIRED_ROLES = ('proxy', 'highres', 'thumb', 'filmstrip')
+
+
+def _role_candidates(folder, role, settings):
+    """Sources that can fill ``role`` for footage: sequences and containers, or single images."""
+    extensions = representation('footage', role, settings)['extensions']
+    sequences, containers, singles = discover_media(folder, extensions, settings)
+    if role in ('proxy', 'thumb', 'filmstrip'):
+        return containers + singles  # one file each: mp4 or jpg
+    return sequences + containers + singles
+
+
+def pair_components(settings, folder, pairing):
+    """Find the mains of a folder ingest and the components that belong to each.
+
+    ``pairing`` is ``{'mode': 'separate' | 'same', 'proxy': ..., 'highres': ...,
+    'thumb': ..., 'filmstrip': ...}``. With ``separate`` each component value is a
+    folder (empty: that component is not paired); with ``same`` it is a regular
+    expression matched against file names inside ``folder`` (a sequence by its first
+    frame). Files a component regex matches are never mains.
+
+    A component belongs to the main whose clean file name it equals, or else starts
+    with: ``assetA.1001.exr`` pairs with ``proxies/assetA.mp4`` and
+    ``highres/assetA_8K.1001.exr``. With several mains matching, the longest name wins.
+    Returns ``[(main, {role: source})]`` in main order. Components that pair with no
+    main, and a main with two candidates for one role, are errors.
+    """
+    pairing = pairing or {}
+    mode = pairing.get('mode') or 'separate'
+    if mode not in ('separate', 'same'):
+        raise ValueError('Pairing must be "separate" or "same" folder structure.')
+    mains = discover_footage_sources(folder, settings)
+    components = {}
+    for role in PAIRED_ROLES:
+        value = str(pairing.get(role) or '').strip()
+        if not value:
+            continue
+        if mode == 'separate':
+            if Path(value).resolve() == Path(folder).resolve():
+                raise ValueError('The %s folder is the main folder; choose "same folder structure" '
+                                 'with a regex instead.' % role)
+            components[role] = _role_candidates(value, role, settings)
+        else:
+            try:
+                expression = re.compile(value, re.IGNORECASE)
+            except re.error as error:
+                raise ValueError('Invalid %s pairing regex %r: %s' % (role, value, error)) from error
+            found = [source for source in _role_candidates(folder, role, settings)
+                     if expression.search(source_file_name(source))]
+            components[role] = found
+            taken = set(found)
+            mains = [main for main in mains if main not in taken
+                     and not expression.search(source_file_name(main))]
+    if not mains:
+        raise ValueError('The folder contains no supported footage sequences or containers to use as mains.')
+    names = {main: clean_file_name(main).casefold() for main in mains}
+    paired = {main: {} for main in mains}
+    unpaired = []
+    for role, sources in components.items():
+        for source in sources:
+            name = clean_file_name(source).casefold()
+            matches = [main for main in mains if name == names[main] or name.startswith(names[main])]
+            if not matches:
+                unpaired.append('%s %s' % (role, source))
+                continue
+            main = max(matches, key=lambda item: (name == names[item], len(names[item])))
+            if role in paired[main]:
+                raise ValueError('%s has two %s candidates: %s and %s. Remove or rename one.'
+                                 % (main, role, paired[main][role], source))
+            paired[main][role] = source
+    if unpaired:
+        raise ValueError('These components match no main by name:\n' + '\n'.join(unpaired))
+    return [(main, paired[main]) for main in mains]
 
 
 def keywords_from_name(name):
@@ -138,8 +257,9 @@ def make_manifest(settings, library, name, category, source, tags, colorspace,
             raise ValueError('FPS must be between 0 and 240.')
     if kind in ('still', 'footage') and not colorspace.strip():
         raise ValueError('Choose an input color space.')
-    if preview_source not in ('main', 'proxy'):
-        raise ValueError('Preview source must be main or proxy.')
+    # Scenario 2: a supplied proxy is where thumbnail and filmstrip come from. The argument
+    # is kept for older callers; it no longer decides anything.
+    preview_source = 'proxy' if media.get('proxy', {}).get('mode') == 'supply' else 'main'
     specs = ASSET_TYPES[kind]['representations']
     media = {key: copy.deepcopy(value) for key, value in media.items() if key in specs and key not in ('main', 'highres')}
     for key, (required, _) in specs.items():
@@ -190,35 +310,40 @@ def make_manifest(settings, library, name, category, source, tags, colorspace,
 
 
 def make_folder_manifests(settings, library, category, folder, colorspace, profile,
-                          preview_source='main', progress=None):
-    """Prepare all folder jobs before submitting any of them."""
+                          preview_source='main', progress=None, pairing=None):
+    """Prepare all folder jobs before submitting any of them.
+
+    ``category`` is a name or ``{'parent': N}`` (see ``category_for``), resolved per main.
+    ``pairing`` pairs proxies, highres, thumbnails and filmstrips with their mains (see
+    ``pair_components``). A paired component is supplied; what is missing is generated,
+    from the proxy when there is one. A highres is always taken as it is.
+    """
     from .metadata_scan import scan_source_metadata
     report = progress or (lambda message: None)
-    report('Discovering footage sequences and containers…')
-    sources = discover_footage_sources(folder, settings)
-    if not sources:
-        raise ValueError('The folder contains no supported footage sequences or containers.')
+    report('Discovering footage and pairing components…')
+    pairs = pair_components(settings, folder, pairing)
     names = {}
-    for source in sources:
+    for source, _ in pairs:
         name = clean_asset_name(source)
-        if name.casefold() in names:
+        key = (category_for(category, source).casefold(), name.casefold())
+        if key in names:
             raise ValueError('Duplicate automatic asset name %s for %s and %s. '
-                             'Rename one source before submitting the folder.' % (name, names[name.casefold()], source))
-        names[name.casefold()] = source
+                             'Rename one source before submitting the folder.' % (name, names[key], source))
+        names[key] = source
     jobs = []
-    for index, source in enumerate(sources, 1):
+    for index, (source, components) in enumerate(pairs, 1):
         name = clean_asset_name(source)
-        report('Scanning metadata %d/%d: %s' % (index, len(sources), name))
+        report('Scanning metadata %d/%d: %s' % (index, len(pairs), name))
         try:
             metadata = scan_source_metadata(source, settings)
             fps = metadata.get('frame_rate')
             if fps is None or not 0 < float(fps) <= 240:
                 raise ValueError('No valid FPS in source metadata. Folder ingest requires embedded FPS.')
-            jobs.append(make_manifest(settings, library, name, category, source, keywords_from_name(name),
-                                      colorspace, profile,
-                                      {key: {'mode': 'generate', 'path': ''}
-                                       for key in ('proxy', 'thumb', 'filmstrip')},
-                                      fps=fps, highres='', preview_source=preview_source,
+            media = {key: ({'mode': 'supply', 'path': components[key]} if key in components
+                           else {'mode': 'generate', 'path': ''}) for key in ('proxy', 'thumb', 'filmstrip')}
+            jobs.append(make_manifest(settings, library, name, category_for(category, source), source,
+                                      keywords_from_name(name), colorspace, profile, media,
+                                      fps=fps, highres=components.get('highres', ''),
                                       kind='footage', metadata=metadata))
         except Exception as error:
             raise ValueError('Cannot prepare %s (%s): %s. No folder jobs have been submitted.'

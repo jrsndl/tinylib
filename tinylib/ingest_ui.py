@@ -5,7 +5,7 @@ import threading
 from pathlib import Path
 from .qt import QtCore, QtWidgets, exec_dialog
 from .views import heading_font
-from .ingest import (clean_asset_name, keywords_from_name, make_manifest,
+from .ingest import (PAIRED_ROLES, category_for, clean_asset_name, keywords_from_name, make_manifest,
                      prepare_source, save_manifest, submit_deadline, submit_deadline_batch,
                      make_folder_manifests)
 from .asset_types import ASSET_TYPES, default_metadata
@@ -54,6 +54,18 @@ class PathField(QtWidgets.QWidget):
         return self.edit.text().strip()
 
 
+def category_key(category):
+    """A comparable text for a category name or a ``{'parent': N}`` rule."""
+    return json.dumps(category, sort_keys=True) if isinstance(category, dict) else str(category).strip().casefold()
+
+
+def folder_manifests(args, progress=None):
+    """The folder batch for form arguments; ``args[13]`` carries ``{'pairing': ...}`` in batch mode."""
+    options = args[13] if isinstance(args[13], dict) else {}
+    return make_folder_manifests(args[0], args[1], args[3], args[4], args[6], args[7],
+                                 progress=progress, pairing=options.get('pairing'))
+
+
 class Submission(QtCore.QThread):
     progress = QtCore.Signal(str)
     done = QtCore.Signal(object)
@@ -77,9 +89,7 @@ class Submission(QtCore.QThread):
                 manifest = make_manifest(*self.arguments)
                 self.done.emit(submit_deadline(manifest, self.settings, progress=self.progress.emit))
                 return
-            args = self.arguments
-            manifests = make_folder_manifests(self.settings, args[1], args[3], args[4], args[6], args[7],
-                                               args[11], self.progress.emit)
+            manifests = folder_manifests(self.arguments, self.progress.emit)
             def submitted(manifest, identifier, path):
                 item = {'name': manifest['name'], 'job_id': identifier, 'manifest': str(path)}
                 confirmed.append(item)
@@ -104,7 +114,7 @@ class SubmissionWindow(QtWidgets.QDialog):
         self.batch = batch
         self.confirmed_jobs = []
         self.destination = (str(Path(arguments[1]['root']).resolve()).casefold(),
-                            arguments[3].strip().casefold(),
+                            category_key(arguments[3]),
                             '@folder:' + root_key(arguments[4]) if batch else arguments[2].strip().casefold())
         self.setWindowTitle('Deadline folder batch: ' + arguments[2] if batch else 'Deadline submission: ' + arguments[2])
         self.setModal(False)
@@ -181,7 +191,7 @@ def worker_arguments(args):
 def build_manifest(args, batch):
     """Pure function of the form values: safe to run in a worker thread."""
     if batch:
-        return make_folder_manifests(args[0], args[1], args[3], args[4], args[6], args[7], args[11])
+        return folder_manifests(args)
     return make_manifest(*args)
 
 
@@ -285,19 +295,28 @@ class IngestDialog(QtWidgets.QDialog):
         self.kind.setCurrentIndex(self.kind.findData('footage'))
         form.addRow('Asset type', self.kind)
 
+        self.category_mode = IngestComboBox()
+        for label, mode in (('Pick existing', 'pick'), ('Create new', 'new'), ('From main folder', 'parent')):
+            self.category_mode.addItem(label, mode)
         self.category = IngestComboBox()
-        self.new_category = QtWidgets.QCheckBox('Create new')
         self.new_category_name = QtWidgets.QLineEdit()
         self.new_category_name.setPlaceholderText('New category name')
-        self.new_category_name.setEnabled(False)
+        self.parent_levels = IngestComboBox()
+        for levels in (1, 2, 3):
+            self.parent_levels.addItem('%d level%s up' % (levels, '' if levels == 1 else 's'), levels)
+        self.category_preview = QtWidgets.QLabel()
         category_widget = QtWidgets.QWidget()
         category_row = QtWidgets.QHBoxLayout(category_widget)
         category_row.setContentsMargins(0, 0, 0, 0)
+        category_row.addWidget(self.category_mode)
         category_row.addWidget(self.category, 1)
-        category_row.addWidget(self.new_category)
         category_row.addWidget(self.new_category_name, 1)
+        category_row.addWidget(self.parent_levels)
+        category_row.addWidget(self.category_preview, 1)
         form.addRow('Main category', category_widget)
-        self.new_category.toggled.connect(self.toggle_new_category)
+        self.category_mode.currentIndexChanged.connect(self.update_category_mode)
+        self.parent_levels.currentIndexChanged.connect(self.update_category_preview)
+        self.update_category_mode()
         self._preferred_category = ''
         if library_root:
             selected_root = root_key(library_root)
@@ -314,11 +333,35 @@ class IngestDialog(QtWidgets.QDialog):
         self.source.edit.setAcceptDrops(False)
         self.source.selected.connect(self.source_selected)
         form.addRow('Main', self.source)
-        self.batch_hint = QtWidgets.QLabel('Folder batch: each detected sequence/container becomes a separate Deadline job. '
-                                          'Names, keywords and FPS are automatic; proxy, thumbnail and filmstrip are generated.')
+        self.batch_hint = QtWidgets.QLabel(
+            'Folder batch: each detected sequence/container becomes a separate Deadline job. Names, keywords '
+            'and FPS are automatic. Paired components are used as they are; what is missing is generated, '
+            'from the paired proxy when there is one.')
         self.batch_hint.setWordWrap(True)
         form.addRow('', self.batch_hint)
         self.batch_hint.hide()
+        self.pairing_mode = IngestComboBox()
+        self.pairing_mode.addItem('Separate folder structure', 'separate')
+        self.pairing_mode.addItem('Same folder structure', 'same')
+        self.pairing_mode.setToolTip('Separate: each component has its own folder, paired by file name. '
+                                     'Same: the components are among the main files; a regex picks each.')
+        form.addRow('Components are in', self.pairing_mode)
+        self.pairing_fields = {}
+        examples = {'proxy': r'^.*\.mp4$', 'highres': r'^.*_8K.*\.exr$', 'thumb': r'^.*_thumb\.jpg$',
+                    'filmstrip': r'^.*_filmstrip\.jpg$'}
+        for role in PAIRED_ROLES:
+            field = QtWidgets.QWidget()
+            row = QtWidgets.QHBoxLayout(field)
+            row.setContentsMargins(0, 0, 0, 0)
+            folder = PathField()
+            regex = QtWidgets.QLineEdit()
+            regex.setPlaceholderText('Regex, e.g. ' + examples[role] + ' (empty: not paired)')
+            folder.edit.setPlaceholderText('Folder (empty: not paired)')
+            row.addWidget(folder)
+            row.addWidget(regex)
+            form.addRow(role.capitalize(), field)
+            self.pairing_fields[role] = field, folder, regex
+        self.pairing_mode.currentIndexChanged.connect(self.update_pairing_mode)
         hint = QtWidgets.QLabel('Choose a still, sequence frame, footage container, asset file, or folder. '
                                 'Footage folders are searched recursively; image sequences are detected automatically.')
         hint.setWordWrap(True)
@@ -333,6 +376,7 @@ class IngestDialog(QtWidgets.QDialog):
         self.fps.setValue(24)
         form.addRow('Sequence FPS', self.fps)
         self.highres = PathField()
+        self.highres.setToolTip('Copied as it is; never converted.')
         form.addRow('Highres (optional)', self.highres)
         self.color = IngestComboBox()
         self.color.setEditable(True)
@@ -349,9 +393,6 @@ class IngestDialog(QtWidgets.QDialog):
         self.profile = IngestComboBox()
         self.profile.addItems(list(settings.get('profiles', {})))
         form.addRow('Processing profile', self.profile)
-        self.preview_source = IngestComboBox()
-        self.preview_source.addItems(['main', 'proxy'])
-        form.addRow('Generate thumb / strip from', self.preview_source)
         self.media = {}
         self.media_rows = {}
         for key, label in [('proxy', 'Proxy'), ('thumb', 'Thumbnail · 960 × 506'),
@@ -376,7 +417,6 @@ class IngestDialog(QtWidgets.QDialog):
         self.proxy_warning.setWordWrap(True)
         self.proxy_warning.setStyleSheet('color: #ffa02f;')
         self.media['proxy'][0].parentWidget().layout().addWidget(self.proxy_warning)
-        self.preview_source.currentTextChanged.connect(self.scan_proxy)
         self.media['proxy'][0].currentTextChanged.connect(self.scan_proxy)
         self.media['proxy'][1].selected.connect(self.scan_proxy)
         self.media['proxy'][1].edit.textChanged.connect(self.invalidate_proxy)
@@ -385,8 +425,10 @@ class IngestDialog(QtWidgets.QDialog):
         self.source.edit.textChanged.connect(self.invalidate_main)
         self.kind.currentIndexChanged.connect(lambda: self.update_type(self.kind.currentData()))
         self.update_type(self.kind.currentData())
+        self.set_batch_mode(False)  # pairing rows show only for a folder batch
         note = QtWidgets.QLabel('Generated previews are available for Still and Footage. Other asset types require a supplied JPG thumbnail. '
-                              'Main and highres files are copied without changing their pixels.')
+                              'Main and highres files are copied without changing their pixels. For Footage with a supplied '
+                              'proxy, a generated thumbnail and filmstrip are taken from the proxy.')
         note.setWordWrap(True)
         form.addRow('', note)
         self.status = QtWidgets.QLabel('Choose inputs, then review the job before submission.')
@@ -467,15 +509,55 @@ class IngestDialog(QtWidgets.QDialog):
         self.category.blockSignals(False)
         self.category.setToolTip('Could not discover additional folders: ' + error if error else '')
 
-    def toggle_new_category(self, checked):
-        self.category.setEnabled(not checked)
-        self.new_category_name.setEnabled(checked)
+    def update_category_mode(self, *_):
+        mode = self.category_mode.currentData()
+        self.category.setVisible(mode == 'pick')
+        self.new_category_name.setVisible(mode == 'new')
+        self.parent_levels.setVisible(mode == 'parent')
+        self.category_preview.setVisible(mode == 'parent')
+        self.update_category_preview()
+
+    def update_category_preview(self, *_):
+        if self.category_mode.currentData() != 'parent':
+            return
+        if self._batch_folder:
+            self.category_preview.setText('from each main file\'s folder')
+            return
+        try:
+            name = category_for(self.selected_category(), self.source.text()) if self.source.text() else ''
+            self.category_preview.setText('→ ' + name if name else '')
+        except ValueError as error:
+            self.category_preview.setText(str(error))
 
     def selected_category(self):
-        return self.new_category_name.text().strip() if self.new_category.isChecked() else self.category.currentText().strip()
+        """A category name, or ``{'parent': N}`` for the folder N levels above the main file."""
+        mode = self.category_mode.currentData()
+        if mode == 'parent':
+            return {'parent': self.parent_levels.currentData()}
+        return self.new_category_name.text().strip() if mode == 'new' else self.category.currentText().strip()
+
+    def update_pairing_mode(self, *_):
+        separate = self.pairing_mode.currentData() == 'separate'
+        for field, folder, regex in self.pairing_fields.values():
+            folder.setVisible(separate)
+            regex.setVisible(not separate)
+
+    def pairing(self):
+        mode = self.pairing_mode.currentData()
+        values = {role: (folder.text() if mode == 'separate' else regex.text().strip())
+                  for role, (field, folder, regex) in self.pairing_fields.items()}
+        return dict(values, mode=mode)
 
     def set_batch_mode(self, enabled):
         self.batch_hint.setVisible(enabled)
+        for widget in [self.pairing_mode] + [field for field, _, _ in self.pairing_fields.values()]:
+            widget.setVisible(enabled)
+            label = self.form.labelForField(widget)
+            if label is not None:
+                label.setVisible(enabled)
+        if enabled:
+            self.update_pairing_mode()
+        self.update_category_preview()
         for widget in (self.name, self.fps, self.highres, self.tags, self.known_tags, self.metadata):
             widget.setVisible(not enabled)
             label = self.form.labelForField(widget)
@@ -502,8 +584,8 @@ class IngestDialog(QtWidgets.QDialog):
                 self._batch_folder = value
                 self.set_batch_mode(True)
                 self.invalidate_proxy()
-                self.status.setText('Folder batch selected. Submit creates one job per sequence/container, '
-                                    'using automatic metadata and generated previews.')
+                self.status.setText('Folder batch selected. Choose where the proxies, highres and other '
+                                    'components are; Review job shows how they paired.')
                 return
             source = prepare_source(value, self.kind.currentData(), self.settings)
             self.source.edit.setText(source)
@@ -518,6 +600,7 @@ class IngestDialog(QtWidgets.QDialog):
                 self.tags.setText(keywords)
                 self._auto_tags = keywords
             self.status.setText('Main source is valid for %s.' % ASSET_TYPES[self.kind.currentData()]['label'])
+            self.update_category_preview()
             if self.kind.currentData() == 'footage':
                 self.start_scan('main', source)
             self.scan_proxy()
@@ -584,7 +667,7 @@ class IngestDialog(QtWidgets.QDialog):
     def scan_proxy(self, *_):
         self.invalidate_proxy()
         mode, path = self.media['proxy']
-        if (not self._batch_folder and self.kind.currentData() == 'footage' and self.preview_source.currentText() == 'proxy'
+        if (not self._batch_folder and self.kind.currentData() == 'footage'
                 and mode.currentText() == 'supply' and path.text()):
             self.start_scan('proxy', path.text())
 
@@ -628,11 +711,19 @@ class IngestDialog(QtWidgets.QDialog):
             metadata = {} if self._batch_folder else json.loads(self.metadata.toPlainText() or '{}')
         except ValueError as error:
             raise ValueError('Type metadata is invalid JSON: ' + str(error))
+        category = self.selected_category()
+        if self._batch_folder:
+            # Resolved per main file; the pairing travels where single jobs carry metadata.
+            metadata = {'pairing': self.pairing()}
+        else:
+            category = category_for(category, self.source.text())
+        if not category:
+            raise ValueError('Choose or enter a main category.')
         return (self.settings, self.library.currentData(), Path(self._batch_folder).name if self._batch_folder else self.name.text(),
-            self.selected_category(), self.source.text(), self.tags.text().split(','),
+            category, self.source.text(), self.tags.text().split(','),
             self.color.currentText(), self.profile.currentText(),
             {k: {'mode': mode.currentText(), 'path': path.text()} for k, (mode, path) in self.media.items()},
-            self.fps.value(), self.highres.text(), self.preview_source.currentText(), self.kind.currentData(), metadata)
+            self.fps.value(), self.highres.text(), 'main', self.kind.currentData(), metadata)
 
     def manifest(self):
         return build_manifest(self.manifest_arguments(), bool(self._batch_folder))
@@ -711,7 +802,7 @@ class IngestDialog(QtWidgets.QDialog):
             return self.error(str(error))
         batch = bool(self._batch_folder)
         destination = (str(Path(arguments[1]['root']).resolve()).casefold(),
-                       arguments[3].strip().casefold(),
+                       category_key(arguments[3]),
                        '@folder:' + root_key(arguments[4]) if batch else arguments[2].strip().casefold())
         if any(window.destination == destination and window.state != 'failed'
                for window in self._submissions):

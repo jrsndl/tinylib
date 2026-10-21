@@ -1,6 +1,7 @@
 """Nuke imports are isolated from the browser and processing code."""
 from pathlib import Path
 from .library import frame_path
+from .asset_fields import display_name
 
 
 def import_asset(asset, highres=False):
@@ -24,7 +25,7 @@ def import_asset(asset, highres=False):
         if selected is None:
             raise ValueError('Color space %r is not available in this Nuke project.' % space)
         node['colorspace'].setValue(selected)
-        node['label'].setValue(asset['name'].replace('[', '(').replace(']', ')'))
+        node['label'].setValue(display_name(asset).replace('[', '(').replace(']', ')'))
         return node
     except Exception:
         nuke.delete(node)

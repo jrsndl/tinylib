@@ -6,7 +6,7 @@ from .library import Library
 from .asset_types import validate_metadata, relative_paths
 from .asset_fields import DEFAULT_FIELDS, validate_fields
 
-EDITABLE = {'colorspace', 'tags', 'metadata'} | set(DEFAULT_FIELDS)
+EDITABLE = {'colorspace', 'tags', 'metadata', 'label'} | set(DEFAULT_FIELDS)
 
 
 def writable_library(settings, access, asset):
@@ -88,3 +88,40 @@ def save_assets(settings, access, edits, edit_tokens):
         database = Library(library['root'], library['name'], library.get('legacy_roots', []))
         updated.extend(database.update_assets(patches, edit_token=edit_tokens[key]))
     return updated
+
+
+class DeleteStopped(RuntimeError):
+    """Deleting stopped in one library; ``deleted`` lists the assets already deleted in others."""
+    def __init__(self, error, deleted, problems):
+        super().__init__(str(error))
+        self.deleted, self.problems = list(deleted), list(problems)
+
+
+def delete_assets(settings, access, assets, edit_tokens, remove_files=False):
+    """Delete assets from their databases, one locked write per library.
+
+    Administrators only, with edit rights on every library involved; both are
+    checked, from a fresh read of the security file, before anything is deleted.
+    With ``remove_files`` each asset's own folder is deleted too, after its database
+    write. Returns the messages about files that were kept or could not be deleted.
+    Raises ``DeleteStopped`` when a library fails after others were already written.
+    """
+    access.refresh()
+    if not access.is_admin:
+        raise PermissionError('Only administrators can delete assets.')
+    groups = {}
+    for asset in assets:
+        library = writable_library(settings, access, asset)
+        groups.setdefault(root_key(library['root']), (library, []))[1].append(asset)
+    problems, deleted = [], []
+    for key, (library, originals) in groups.items():
+        database = Library(library['root'], library['name'], library.get('legacy_roots', []))
+        try:
+            problems.extend(database.delete_assets(originals, edit_token=edit_tokens.get(key),
+                                                   remove_files=remove_files))
+        except Exception as error:
+            if deleted:
+                raise DeleteStopped(error, deleted, problems) from error
+            raise
+        deleted.extend(originals)
+    return problems

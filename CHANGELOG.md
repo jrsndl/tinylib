@@ -11,6 +11,8 @@
 
 ### Interface
 
+- Fixed: the Length, Width and Stars numbers could not be typed into until an operator was chosen. They are always editable now; typing a number while the operator is Any selects `>` (length, width) or `=` (stars).
+- The **Details** button that shows or hides the asset panel is renamed **Properties**, so it is no longer confused with the Details view mode.
 - The user name and groups move from the top bar to the window title, e.g. `TinyLib · Studio library · jan (admins, artists)`, and update on Refresh.
 - The "TinyLib / Studio library" heading is removed from the top bar; the window title already shows it.
 - Filters take two rows: the search beside the user name and main buttons; length, width, stars, tag picker, asset type and Clear filters together on the second row.
@@ -52,6 +54,26 @@
 - The backend turns off burn-ins, slate, metadata, OIIO transform and smart token defaults from vfx-transcode's `presets.json`, makes anamorphic footage square-pixel, and writes intermediates to the worker's temp folder instead of the staged main sequence.
 - `ocio` under `[tools]` in `tinylib.ini` sets the OCIO config for all processing profiles, so farm workers no longer need the `OCIO` environment variable. A worker without either now says so instead of reporting `${OCIO}` as an inaccessible file.
 - Profiles may set `display`, `view` and `looks` for the backend, and `ocio_config` may be an `ocio://` built-in config.
+- **vfx-transcode is the default for EXR image sequences in every profile.** It was used only by profiles with `"proxy_backend": "vfx_transcode"`, and the ingest form preselects the first profile, so most ingests converted every frame with a separate oiiotool run. Profiles without `proxy_backend` now use it whenever vfx-transcode is installed on the worker and their `color_args` are the plain colourspace conversion; otherwise, and for `"proxy_backend": "builtin"`, the built-in path is used. `"vfx_transcode"` still forces it and now fails on custom `color_args` instead of ignoring them. DPX, TIFF and PNG sequences always use the built-in path, because vfx-transcode does not colour-convert them. The sample `studio.json` drops its separate "VFX Transcode — Rec.709" profile, which is now the same as "ACES to Rec.709". A queued job that names a profile fails on a worker whose configuration no longer has it.
+- The backend runs vfx-transcode with a presets file of TinyLib's own, written for each job, so studio defaults in vfx-transcode's `presets.json` can no longer reach library previews.
+- Frames are converted straight to the size the proxy shows inside 1920x1080. Footage taller than 16:9 was converted 1920 wide and then scaled down again.
+- The thumbnail is made at its fitted size as PNG and only padded to 960x506, instead of a 1280-wide JPEG that was resized and compressed a second time.
+- With previews taken from the proxy, the filmstrip is read from the encoded proxy in the same run, in one decoding pass instead of 24 FFmpeg runs that each decoded the proxy up to their frame.
+- With a supplied proxy and `thumbnail_frame` `largest`, the thumbnail is the largest source frame, as in the built-in path. vfx-transcode had silently used the middle frame, since it compares converted frames and none were converted.
+- The worker probes the first main frame once and reuses it for the asset metadata.
+
+### Editing
+
+- Assets can have a **label**, edited in place of the panel heading while editing one asset (prefilled with the name; never multiedited). The browser, players and Nuke Read nodes show the label instead of the name; the **Name** field and the asset folder keep the ingest name. New tile token `{ingest_name}`; `{name}` shows the label. Search matches labels too.
+- **Delete** in edit mode (administrators only) marks the selected assets for deletion; **Write** shows them in a confirmation window, where each can be unchecked, and deletes them from the database only (default) or from storage and the database. Storage deletion removes only an asset's own `<library>/<category>/<name>` folder and lists any files it kept.
+
+### Ingest
+
+- Footage follows three scenarios. A main-only EXR gets proxy, thumbnail and filmstrip from one vfx-transcode run. With a supplied proxy, thumbnail and filmstrip come from the proxy by FFmpeg, without vfx-transcode. A main-only display-referred main (a movie, or a PNG, TIFF, DPX or JPG sequence) is converted to scene-linear EXRs (profile key `working_colorspace`, default `ACES - ACEScg`; movies via 16-bit PNGs) and then goes through vfx-transcode. Before, display-referred mains used the per-frame built-in path. The highres is never converted.
+- The "Generate thumb / strip from" choice is removed: thumbnail and filmstrip come from the proxy exactly when one is supplied.
+- A long filmstrip from a supplied proxy is made in one FFmpeg pass instead of 24.
+- Folder ingest pairs existing proxies, highres, thumbnails and filmstrips with their mains, from separate folders (by file name: equal, or starting with the main's name) or from the same folder (by a regex per component). Before, every component was generated and highres was skipped.
+- The main category can come from the main file's folder, 1, 2 or 3 levels up, besides picking an existing category or creating one. In a folder batch it is resolved for each main, so one batch can fill several categories.
 
 ## 3.1.0
 

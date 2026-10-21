@@ -4,6 +4,7 @@ import math
 from fractions import Fraction
 from pathlib import Path
 from .qt import QtCore
+from .asset_fields import display_name
 
 
 def sibling_tool(settings, name):
@@ -44,7 +45,7 @@ def frame_filter(asset, stream):
 
 def play_arguments(asset, stream):
     media = asset.get('proxy') or asset.get('thumb')
-    return ['-hide_banner', '-loglevel', 'error', '-window_title', 'TinyLib — ' + asset['name'],
+    return ['-hide_banner', '-loglevel', 'error', '-window_title', 'TinyLib — ' + display_name(asset),
             '-x', '1280', '-y', '720', '-an', '-vf', frame_filter(asset, stream), '-i', media]
 
 

@@ -8,6 +8,7 @@ from collections import OrderedDict
 from fractions import Fraction
 from .qt import QtCore, QtGui, QtWidgets, event_pos
 from .trim import advance_frame, clean_trim
+from .asset_fields import display_name
 
 
 def media_info(asset, stream):
@@ -263,7 +264,7 @@ class ReviewPlayer(QtWidgets.QWidget):
     def __init__(self, settings, asset, stream, parent=None):
         super().__init__(parent, QtCore.Qt.Window)
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose)
-        self.setWindowTitle('TinyLib — ' + asset['name'])
+        self.setWindowTitle('TinyLib — ' + display_name(asset))
         self.setMinimumSize(480, 270)
         self.resize(1100, 660)
         self.setMouseTracking(True)

@@ -128,7 +128,7 @@ Set tools in the `[tools]` section of [`tinylib.ini`](#tinylibini). Because that
 | `ffmpeg` | `ffmpeg` | Generating proxies, thumbnails and filmstrips; decoding in the review player. |
 | `ffprobe` | `ffprobe` | Probing containers (ingest, Rescan metadata) and checking generated media. The player uses `ffprobe` beside `ffmpeg` when this key is not set. |
 | `oiiotool` | `oiiotool` | Color conversion of image files; probing images and sequences. |
-| `vfx_transcode` | `vfx-transcode` | Image-sequence proxies, thumbnails and filmstrips for profiles with `"proxy_backend": "vfx_transcode"`. Needs version 2026.09 or newer. |
+| `vfx_transcode` | `vfx-transcode` | Proxies, thumbnails and filmstrips of EXR image sequences; see `proxy_backend` under [profiles](#profiles). When it is not found on a worker, that worker uses the built-in path. Needs version 2026.09 or newer. |
 | `ffplay` | `ffplay` beside `ffmpeg`, else `ffplay` on PATH | Only with `"player_backend": "ffplay"`. |
 | `ocio` | the profile's `ocio_config` | OCIO config file for every processing profile on this machine; overrides `ocio_config`. A path, or a built-in config such as `ocio://studio-config-latest` (OCIO 2.2+). Set it on farm workers that have no `OCIO` environment variable. |
 
@@ -151,12 +151,13 @@ The ingest form lists profiles by name. The worker looks the same name up in its
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `ocio_config` | path | none | OCIO config file. `ocio` under `[tools]` in `tinylib.ini` overrides it. Must exist on the worker whenever previews are generated from image files (stills and image sequences), and for `proxy_backend` `vfx_transcode`, which also accepts a built-in config such as `ocio://studio-config-latest`. Footage containers are converted with FFmpeg and do not use it. |
+| `ocio_config` | path | none | OCIO config file. `ocio` under `[tools]` in `tinylib.ini` overrides it. Must exist on the worker whenever previews are generated from image files (stills and image sequences), and for vfx-transcode, which also accepts a built-in config such as `ocio://studio-config-latest`. Footage containers are converted with FFmpeg and do not use it. |
 | `output_colorspace` | string | `Output - Rec.709` | OCIO display color space of generated previews. |
 | `color_args` | list of strings | `["--colorconvert", "{input_colorspace}", "{output_colorspace}"]` | oiiotool arguments for the color conversion. `{input_colorspace}` is the main color space chosen at ingest; `{output_colorspace}` is `output_colorspace`. An empty list is an error. |
 | `thumbnail_frame` | `"largest"` or `"middle"` | `"largest"` | Frame used for a generated thumbnail: the largest source file, or the middle frame. |
-| `proxy_backend` | `"vfx_transcode"` | built-in | `"vfx_transcode"` makes the generated previews of image-sequence footage with one `tools.vfx_transcode` run: the proxy, and the thumbnail and filmstrip unless they are taken from the proxy (`preview_source` `proxy`). The frames are converted once, in the worker's local temp folder. Anamorphic footage is made square-pixel. A frame that fails to convert fails the ingest. Footage containers and stills keep the built-in path. |
-| `display`, `view`, `looks` | strings | not used | `vfx_transcode` only: convert with an OCIO display/view (ACES 1.3+ configs) instead of `output_colorspace`. `""` means the config's default. |
+| `proxy_backend` | `"vfx_transcode"` or `"builtin"` | automatic | How the previews of EXR image sequences are made. vfx-transcode makes the proxy, filmstrip and thumbnail in one `tools.vfx_transcode` run: the frames are converted once, in the worker's local temp folder, at the size the proxy shows. With `preview_source` `proxy` the filmstrip is read from the new proxy in the same run and the thumbnail is taken from the proxy. Anamorphic footage is made square-pixel. A frame that fails to convert fails the ingest. **Not set:** vfx-transcode when it is installed on the worker and `color_args` is the default; otherwise built-in. **`"vfx_transcode"`:** always; the ingest fails if vfx-transcode is missing or `color_args` is customised. **`"builtin"`:** one oiiotool run per frame. A display-referred main (a movie, or a DPX, TIFF, PNG or JPG sequence) is first converted to `working_colorspace` EXRs in the worker's temp folder. With a supplied proxy, thumbnail and filmstrip come from the proxy and vfx-transcode is not run. Stills always use the built-in path. |
+| `working_colorspace` | string | `ACES - ACEScg` | Scene-linear colour space that display-referred mains (movies, PNG/TIFF/DPX/JPG sequences) are converted to before vfx-transcode makes their previews. Use the name from the OCIO config. |
+| `display`, `view`, `looks` | strings | not used | vfx-transcode only: convert with an OCIO display/view (ACES 1.3+ configs) instead of `output_colorspace`. `""` means the config's default. |
 | `description` | string | | Informational only; TinyLib does not display or use it. |
 
 ### deadline

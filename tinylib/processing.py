@@ -3,6 +3,7 @@ import json
 import re
 import shutil
 import subprocess
+import tempfile
 import uuid
 from fractions import Fraction
 from pathlib import Path
@@ -46,6 +47,53 @@ def probe(path, tools, count=False):
     return streams[0]
 
 
+DEFAULT_COLOR_ARGS = ['--colorconvert', '{input_colorspace}', '{output_colorspace}']
+PROXY_X264 = ('-pix_fmt yuv420p {videofilter} -c:v libx264 -crf 23 -preset faster -movflags +faststart '
+              '-color_primaries bt709 -color_trc bt709 -colorspace bt709')
+
+
+def frame_number(path):
+    """The frame number at the end of a file name (``plate.1001.exr`` -> 1001), else 0."""
+    match = re.search(r'(\d+)(?=\.[^.]+$)', Path(path).name)
+    return int(match[1]) if match else 0
+
+
+def vfx_presets(thumb_size):
+    """A presets file of TinyLib's own for vfx-transcode.
+
+    It replaces the studio's presets.json, so no burn-in, slate, metadata, OIIO
+    transform, smart token or name token default from there reaches a library preview.
+    It also holds what only a presets file can set: the proxy encode and the
+    thumbnail size.
+    """
+    return {
+        'encode_presets': {'tinylib_proxy': {
+            'notes': 'TinyLib proxy; colour tags are in the arguments, as in the built-in path.',
+            'ext': 'mp4', 'encode': PROXY_X264, 'colour_tags': False}},
+        'default_encode': 'tinylib_proxy',
+        'thumbnail_presets': {'tinylib_thumb': {
+            'notes': 'Fitted inside 960x506; TinyLib pads it. png, so the jpg is compressed once.',
+            'width': thumb_size[0], 'height': thumb_size[1], 'format': 'png', 'compression': 1}},
+        'default_thumbnail': 'tinylib_thumb',
+        'filmstrip_presets': {'tinylib_strip': {
+            'tiles': 24, 'tile_width': 480, 'tile_height': 270, 'columns': 24, 'rows': 1, 'quality': 90}},
+        'default_filmstrip': 'tinylib_strip',
+    }
+
+
+def fitted_size(info, width=1920, height=1080):
+    """(w, h) of a frame shown square-pixel inside width x height, both even."""
+    aspect = int(info['width']) * pixel_aspect(info.get('sample_aspect_ratio', '1:1')) / int(info['height'])
+    fitted_w = max(2, min(width, int(height * aspect) // 2 * 2))
+    return fitted_w, max(2, min(height, int(round(fitted_w / aspect / 2)) * 2))
+
+
+def printf_pattern(path):
+    """``plate.1001.exr`` -> ``plate.%04d.exr``, the frame counter as oiiotool and FFmpeg read it."""
+    path = Path(path)
+    return path.with_name(re.sub(r'(\d+)(?=\.[^.]+$)', lambda m: '%%0%dd' % len(m[1]), path.name, count=1))
+
+
 def fit_filter(width, height):
     return ('scale=%d:%d:force_original_aspect_ratio=decrease,'
             'pad=%d:%d:(ow-iw)/2:(oh-ih)/2,setsar=1' % (width, height, width, height))
@@ -58,7 +106,7 @@ class Processor:
         self.tools = manifest['tools']
         self.profile = manifest['profile']
         self.ffmpeg = self.tools.get('ffmpeg', 'ffmpeg')
-        self.cache = {}
+        self.main_info = None  # ffprobe of the first main frame, when generation needed it
 
     def ocio_config(self):
         """The worker's OCIO config: ``ocio`` in tinylib.ini [tools], else the profile's ``ocio_config``."""
@@ -96,35 +144,133 @@ class Processor:
         if not Path(target).is_file():
             raise ValueError('Proxy does not contain requested frame %d' % index)
 
-    def vfx_transcode(self, sources, outputs):
-        """Generate an image sequence's proxy, thumbnail and filmstrip in one vfx-transcode run.
+    def uses_vfx_transcode(self, sources):
+        """Whether this footage's generated previews are made by vfx-transcode.
 
-        One run converts the frames once (OCIO, resize) and reuses them for all three.
-        Previews taken from the proxy (preview_source 'proxy') are left to the built-in
-        code, which reads them from the proxy file. Returns the output keys it made.
+        ``proxy_backend`` unset: yes when vfx-transcode is installed on this worker and the
+        profile's colour conversion is the plain colourspace to colourspace one.
+        ``"vfx_transcode"``: always, failing if it cannot. ``"builtin"``: never.
+        EXR mains go to vfx-transcode as they are. Other mains (containers, and DPX, TIFF,
+        PNG or JPG sequences, usually display-referred) are first converted to
+        scene-linear EXRs, because vfx-transcode only colour-converts EXR.
+        """
+        backend = self.profile.get('proxy_backend') or ''
+        if backend not in ('', 'vfx_transcode', 'builtin'):
+            raise ValueError('Unknown proxy_backend %r; use "vfx_transcode" or "builtin".' % backend)
+        if backend == 'builtin' or not sources:
+            return False
+        plain = self.profile.get('color_args', DEFAULT_COLOR_ARGS) == DEFAULT_COLOR_ARGS
+        if backend == 'vfx_transcode':
+            if not plain:
+                raise ValueError('proxy_backend "vfx_transcode" cannot apply custom color_args; '
+                                 'use display/view, or proxy_backend "builtin".')
+            return True
+        tool = self.tools.get('vfx_transcode', 'vfx-transcode')
+        if not plain or not (Path(tool).is_file() or shutil.which(tool)):
+            log.info('Footage previews use the built-in path (%s).',
+                     'custom color_args' if not plain else 'vfx-transcode not found: %s' % tool)
+            return False
+        return True
+
+    def scene_linear_frames(self, sources, container, size, temp):
+        """Display-referred main -> scene-linear EXR frames for vfx-transcode.
+
+        A container is decoded by FFmpeg to 16-bit PNGs, already at the proxy's size and
+        square-pixel. oiiotool then resizes image sequences the same way (in display
+        space, which avoids ringing on bright values) and converts every frame from the
+        main colour space to the profile's working colour space in one
+        ``--parallel-frames`` run. Returns the EXR files in frame order.
+        """
+        oiiotool = self.tools.get('oiiotool', 'oiiotool')
+        working = self.profile.get('working_colorspace', 'ACES - ACEScg')
+        if container:
+            pngs = temp / 'png'
+            pngs.mkdir()
+            run([self.ffmpeg, '-y', '-v', 'error', '-i', sources[0], '-map', '0:v:0',
+                 '-vf', 'scale=%d:%d:flags=lanczos,setsar=1' % size, '-vsync', 'passthrough',
+                 '-pix_fmt', 'rgb48be', '-start_number', '1001', str(pngs / 'frame.%08d.png')])
+            count = len(list(pngs.glob('frame.*.png')))
+            if not count:
+                raise ValueError('FFmpeg decoded no frames from ' + str(sources[0]))
+            pattern, first, last, resize = pngs / 'frame.%08d.png', 1001, 1000 + count, []
+        else:
+            pattern, first, last = printf_pattern(sources[0]), frame_number(sources[0]), frame_number(sources[-1])
+            resize = ['--resize', '%dx%d' % size]
+        values = dict(input_colorspace=self.job['colorspace'], output_colorspace=working)
+        exrs = temp / 'exr'
+        exrs.mkdir()
+        run([oiiotool, '--colorconfig', self.ocio_config(), '--parallel-frames', '--frames', '%d-%d' % (first, last),
+             str(pattern), '--ch', 'R,G,B'] + resize + [a.format(**values) for a in DEFAULT_COLOR_ARGS]
+            + ['-d', 'half', '-o', str(exrs / 'frame.%08d.exr')])
+        made = sorted(exrs.glob('frame.*.exr'))
+        if len(made) != last - first + 1:
+            raise ValueError('oiiotool wrote %d of %d scene-linear frames.' % (len(made), last - first + 1))
+        return made
+
+    def vfx_transcode(self, sources, outputs):
+        """Generate footage's proxy, thumbnail and filmstrip in one vfx-transcode run.
+
+        Ingest scenario 1 (EXR main) and 3 (display-referred main, converted to
+        scene-linear EXRs first). The frames are converted once, at the proxy's fitted
+        size, and reused for the proxy and filmstrip. With preview_source 'proxy' the
+        filmstrip is read back from the encoded proxy in the same run; that thumbnail
+        stays with the built-in code. Returns the output keys it made.
         """
         job, media = self.job, self.job['media']
         from_main = job['preview_source'] != 'proxy'
-        wanted = [key for key in ('proxy', 'thumb', 'filmstrip')
-                  if outputs.get(key) and media[key]['mode'] == 'generate' and (key == 'proxy' or from_main)]
+
+        def generated(key):
+            return bool(outputs.get(key)) and media[key]['mode'] == 'generate'
+        wanted = ['proxy'] if generated('proxy') else []
+        if generated('thumb') and from_main:
+            wanted.append('thumb')
+        if generated('filmstrip') and (from_main or 'proxy' in wanted):
+            wanted.append('filmstrip')
         if not wanted:
             return set()
-        ocio = self.ocio_config()
+        self.ocio_config()  # fail before converting anything
+        groups = extension_groups({'extension_groups': job.get('extension_groups', {})})
+        container = len(sources) == 1 and sources[0].suffix.lower().lstrip('.') in groups['extensions_footage_containers']
+        scene_linear = all(source.suffix.lower() == '.exr' for source in sources)
+        info = self.main_info = probe(sources[0], self.tools)
+        size = fitted_size(info)
+        temp = None
+        try:
+            if scene_linear:
+                frames, colorspace, extra = sources, job['colorspace'], []
+            else:
+                temp = Path(tempfile.mkdtemp(prefix='tinylib-ingest-'))
+                frames = self.scene_linear_frames(sources, container, size, temp)
+                colorspace = self.profile.get('working_colorspace', 'ACES - ACEScg')
+                extra = ['-par', '1', '-par_source', 'arg_only']  # already square-pixel
+            self._vfx_run(frames, outputs, wanted, colorspace, size, extra, from_main,
+                          largest=None if container else max(range(len(sources)),
+                                                             key=lambda i: sources[i].stat().st_size))
+        finally:
+            if temp is not None:
+                shutil.rmtree(temp, ignore_errors=True)
+        return set(wanted)
+
+    def _vfx_run(self, frames, outputs, wanted, colorspace, size, extra, from_main, largest):
+        job = self.job
         rate = Fraction(str(job['fps'])).limit_denominator(1001)
         ntsc = Fraction(round(rate * Fraction(1001, 1000)) * 1000, 1001)
         if rate.denominator != 1 and abs(rate - ntsc) < Fraction(1, 100):
             rate = ntsc  # 23.976 is 24000/1001; vfx-transcode uses a typed fraction exactly.
         rate = str(rate.numerator) if rate.denominator == 1 else '%s/%s' % (rate.numerator, rate.denominator)
-        args = [self.tools.get('vfx_transcode', 'vfx-transcode'), '-i', sources[0],
+        presets = self.work / 'vfx-transcode-presets.json'
+        aspect = size[0] / size[1]
+        presets.write_text(json.dumps(vfx_presets((960, 0) if aspect >= 960 / 506 else (0, 506)), indent=1),
+                           encoding='utf-8')
+        args = [self.tools.get('vfx_transcode', 'vfx-transcode'), '-i', frames[0], '-presets_file', presets,
                 # The ingest FPS is authoritative; validate_media compares the proxy against it.
-                '-r', rate, '-fps_source', 'arg_only', '-ci', job['colorspace'], '-ocio', ocio,
+                '-r', rate, '-fps_source', 'arg_only', '-ci', colorspace, '-ocio', self.ocio_config(),
                 '-oiio', self.tools.get('oiiotool', 'oiiotool'), '-ffmpeg', self.ffmpeg,
                 '-ffprobe', self.tools.get('ffprobe', 'ffprobe'),
-                # Library previews are clean pictures: no studio defaults from the presets file.
-                '-burn_preset', 'none', '-slate', 'none', '-metadata_preset', 'none',
-                '-oiio_transform', 'none', '-smart_tokens', 'none',
-                '-par_out', 'square', '-alpha', 'drop', '-temp_location', 'user',
-                '-mezzanine', 'jpg', '-width', '1920']
+                '-par_out', 'square', '-alpha', 'drop', '-temp_location', 'user', '-mezzanine', 'jpg',
+                # Convert straight to the size the proxy shows (inside 1920x1080), so a frame taller
+                # than 16:9 is neither converted larger than needed nor resized a second time.
+                '-width', size[0]] + extra
         display, view = self.profile.get('display'), self.profile.get('view')
         if display is not None or view is not None:
             args += ['-display', display or '', '-view', view or '']
@@ -133,30 +279,51 @@ class Processor:
         else:
             args += ['-co', self.profile.get('output_colorspace', 'Output - Rec.709')]
         if 'proxy' in wanted:
-            args += ['-ff_filter', fit_filter(1920, 1080),
-                     # -ff_encode replaces the preset and adds no colour tags, so they are given here.
-                     '-ff_encode', '-pix_fmt yuv420p {videofilter} -c:v libx264 -crf 23 -preset faster '
-                                   '-movflags +faststart -color_primaries bt709 -color_trc bt709 -colorspace bt709',
-                     '-o', outputs['proxy']]
+            args += ['-ff_filter', fit_filter(1920, 1080), '-o', outputs['proxy']]
         thumb = self.work / 'vfx_thumb'
         if 'thumb' in wanted:
-            frame = 'largest' if self.profile.get('thumbnail_frame', 'largest') == 'largest' else 'middle'
+            if self.profile.get('thumbnail_frame', 'largest') != 'largest':
+                frame = 'middle'
+            elif 'proxy' in wanted:
+                frame = 'largest'  # the busiest converted frame
+            elif largest is None:
+                frame = 'middle'  # one container file: no per-frame sizes to compare
+            else:
+                # Without a movie there are no converted frames to compare; vfx-transcode would
+                # fall back to the middle frame. Use the built-in rule: the largest source file.
+                frame = str(frame_number(frames[largest]))
             args += ['-ot', thumb, '-thumbnail_frame', frame]
         if 'filmstrip' in wanted:
-            args += ['-of', outputs['filmstrip'], '-filmstrip_tiles', '24', '-filmstrip_tile', '480x270',
-                     '-filmstrip_grid', '24x1', '-filmstrip_quality', '90', '-filmstrip_slate', '0',
-                     '-filmstrip_source', 'intermediates' if 'proxy' in wanted else 'source']
+            source = 'movie' if not from_main else 'intermediates' if 'proxy' in wanted else 'source'
+            args += ['-of', outputs['filmstrip'], '-filmstrip_source', source]
         # Exit code 2 (frames replaced by neighbours) fails the ingest like any other error.
         run(args)
         if 'thumb' in wanted:
             made = sorted(self.work.glob('vfx_thumb.*'))
             if not made:
                 raise ValueError('vfx-transcode did not write a thumbnail.')
-            # vfx-transcode resizes thumbnails by width; the library needs the padded 960x506 canvas.
+            # Already fitted inside 960x506; FFmpeg only pads it to the library canvas.
             self.image(made[0], outputs['thumb'], (960, 506), convert=False)
-        return set(wanted)
+
+    def proxy_filmstrip(self, proxy, count, target):
+        """24 evenly spaced frames of the proxy, fitted and tiled, in one decoding pass."""
+        select = '+'.join('eq(n\\,%d)' % index for index in sample_indices(count))
+        run([self.ffmpeg, '-y', '-v', 'error', '-i', proxy, '-an',
+             '-vf', 'select=%s,%s,tile=24x1' % (select, fit_filter(480, 270)),
+             '-frames:v', '1', '-q:v', '2', target])
+        if not Path(target).is_file():
+            raise ValueError('FFmpeg did not write the filmstrip from the proxy.')
 
     def generate(self, sources, outputs):
+        """Ingest scenarios for footage:
+
+        1. Main only, EXR: vfx-transcode makes proxy, thumbnail and filmstrip in one run.
+        2. Main and a supplied proxy: thumbnail and filmstrip come from the proxy, by FFmpeg.
+        3. Main only, display-referred (container, DPX/TIFF/PNG/JPG): converted to
+           scene-linear EXRs, then as 1.
+        The highres representation is never converted. Stills, and profiles that opt out
+        of vfx-transcode, use the built-in per-frame path.
+        """
         job = self.job
         media = job['media']
         footage = job['kind'] == 'footage'
@@ -165,7 +332,7 @@ class Processor:
         container = footage and len(sources) == 1 and sources[0].suffix.lower() in containers
         proxy = outputs.get('proxy')
         made = set()
-        if footage and not container and self.profile.get('proxy_backend') == 'vfx_transcode':
+        if footage and self.uses_vfx_transcode(sources):
             made = self.vfx_transcode(sources, outputs)
         if proxy and media['proxy']['mode'] == 'generate' and 'proxy' not in made:
             if container:
@@ -206,6 +373,9 @@ class Processor:
                      'fps=24/%s,%s,tile=24x1' % (duration, fit_filter(480, 270)),
                      '-frames:v', '1', '-q:v', '2', outputs['filmstrip']])
                 return
+            if job['preview_source'] == 'proxy' and len(sources) >= 24:
+                # Every sample is a different frame, so one select-and-tile pass makes the strip.
+                return self.proxy_filmstrip(proxy, len(sources), outputs['filmstrip'])
             frames = self.work / 'strip_frames'
             frames.mkdir()
             for index, frame in enumerate(sample_indices(len(sources))):
@@ -376,14 +546,16 @@ def process(manifest_path, access=None, settings=None):
                     shutil.copytree(supplied, outputs[key], dirs_exist_ok=True)
                 else:
                     shutil.copy2(supplied, outputs[key])
+        processor = None
         if job['kind'] in ('still', 'footage'):
-            Processor(job, work).generate([main_dir / p.name for p in sources], outputs)
+            processor = Processor(job, work)
+            processor.generate([main_dir / p.name for p in sources], outputs)
         validate_media(outputs, job)
         pattern, first, last = split_sequence(job['source'])
         destination = root / category / name
         metadata = dict(job.get('metadata', {}))
         if job['kind'] in ('still', 'footage'):
-            main_info = probe(main_dir / sources[0].name, job['tools'])
+            main_info = processor.main_info or probe(main_dir / sources[0].name, job['tools'])
             metadata.update(width=int(main_info['width']), height=int(main_info['height']),
                             pixel_aspect=pixel_aspect(main_info.get('sample_aspect_ratio', '1:1')))
             groups = extension_groups({'extension_groups': job.get('extension_groups', {})})

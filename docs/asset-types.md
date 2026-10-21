@@ -24,6 +24,7 @@ These top-level fields apply to every asset type. Existing `category` remains th
 
 | Fields | Type | Default |
 | --- | --- | --- |
+| label | string, one line, up to 200 characters | absent or empty: the name is shown |
 | category_1, category_2, category_3 | string | empty |
 | version_to_delete | boolean | false |
 | version_number | integer | 1 |
@@ -35,4 +36,4 @@ These top-level fields apply to every asset type. Existing `category` remains th
 | acquire_price | currency code, space, amount | eur 0 |
 | acquire_usage, acquire_note | multiline string | empty |
 
-New ingests set `ingest_user` to the submitting Windows identity and `ingest_date` to the submission date. Extra categories are labels; only the primary category determines the folder. The Properties panel offers multiline editors for notes/usage, a checkbox for deletion, and an integer version control. Field visibility and editing follow the studio/library prefix ACLs described in [actions and access](actions-and-access.md).
+`label` is shown in the interface instead of `name`; `name` stays the name used at ingest and the folder name. Older assets have no `label` until one is set. New ingests set `ingest_user` to the submitting Windows identity and `ingest_date` to the submission date. Extra categories are labels; only the primary category determines the folder. The Properties panel offers multiline editors for notes/usage, a checkbox for deletion, and an integer version control. Field visibility and editing follow the studio/library prefix ACLs described in [actions and access](actions-and-access.md).

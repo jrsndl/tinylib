@@ -11,6 +11,7 @@ from .preferences import asset_key
 from .filters import duration
 from .preferences import ASSET_MIME, COLLECTION_MIME
 from .tile_text import DEFAULT_TEMPLATE, render_template, validate_template
+from .asset_fields import display_name
 from .path_format import format_assets
 from .thumbnail_cache import cache_root, cached_image_path
 from pathlib import Path
@@ -280,6 +281,26 @@ class ImageCache(QtCore.QObject):
                 'seconds': seconds, 'root': str(self.disk_root)}
 
 
+MARKED_COLOR = '#ef5b5b'
+
+
+def is_marked(index):
+    model = index.model()
+    keys = getattr(model, 'marked_keys', None)
+    return bool(keys) and asset_key(index.data(QtCore.Qt.UserRole)) in keys
+
+
+def paint_marked(painter, rect, label=True):
+    """Red veil and outline over the preview of an asset marked for deletion."""
+    painter.fillRect(rect, QtGui.QColor(166, 40, 40, 110))
+    painter.setPen(QtGui.QPen(QtGui.QColor(MARKED_COLOR), 2))
+    painter.setBrush(QtCore.Qt.NoBrush)
+    painter.drawRect(rect.adjusted(1, 1, -1, -1))
+    if label:
+        painter.setPen(QtGui.QColor('white'))
+        painter.drawText(rect, QtCore.Qt.AlignCenter, 'Marked for deletion')
+
+
 class AssetModel(QtCore.QAbstractTableModel):
     headers = ['Name', 'Preview', 'Library', 'Category', 'Type', 'Length (s)', 'Width', 'Height', 'Stars', 'Keywords']
 
@@ -290,6 +311,7 @@ class AssetModel(QtCore.QAbstractTableModel):
         self.path_notation = 'nuke'
         self.trim_for = None  # asset -> (in, out) for dragged paths, set by the owner.
         self.revision = 0
+        self.marked_keys = set()  # asset_key()s marked for deletion in edit mode
 
     def rowCount(self, parent=QtCore.QModelIndex()):
         return 0 if parent.isValid() else len(self.assets)
@@ -309,14 +331,24 @@ class AssetModel(QtCore.QAbstractTableModel):
         if role == QtCore.Qt.DisplayRole:
             seconds = duration(asset)
             metadata = asset.get('metadata', {})
-            return [asset['name'], '', asset['library'], asset['category'], asset.get('kind', ''),
+            return [display_name(asset), '', asset['library'], asset['category'], asset.get('kind', ''),
                     '%.2f' % seconds if seconds is not None else '—', metadata.get('width', '—'),
                     metadata.get('height', '—'), str(asset.get('_rating', 0)) + ' / 5',
                     ', '.join(asset.get('tags', []))][index.column()]
         if role == QtCore.Qt.UserRole:
             return asset
         if role == QtCore.Qt.ToolTipRole:
-            return asset['name'] + '\n' + ', '.join(asset.get('tags', []))
+            marked = '\nMarked for deletion' if asset_key(asset) in self.marked_keys else ''
+            label = display_name(asset)
+            title = label if label == asset['name'] else '%s\nIngest name: %s' % (label, asset['name'])
+            return title + '\n' + ', '.join(asset.get('tags', [])) + marked
+        if self.marked_keys and asset_key(asset) in self.marked_keys:
+            if role == QtCore.Qt.ForegroundRole:
+                return QtGui.QBrush(QtGui.QColor(MARKED_COLOR))
+            if role == QtCore.Qt.FontRole:
+                font = QtGui.QFont()
+                font.setStrikeOut(True)
+                return font
 
     def replace(self, assets):
         self.beginResetModel()
@@ -395,6 +427,8 @@ class Cards(QtWidgets.QStyledItemDelegate):
             painter.setPen(QtGui.QColor('#707070'))
             loading = any(asset.get(role) in self.cache.pending for role in ('thumb', 'filmstrip'))
             painter.drawText(image_rect, QtCore.Qt.AlignCenter, 'Loading preview…' if loading else 'Preview unavailable')
+        if is_marked(index):
+            paint_marked(painter, image_rect)
         if self.info:
             metrics = painter.fontMetrics()
             lines = render_template(self.template, asset).split('\n') if self.template else []
@@ -429,6 +463,8 @@ class TinyPreview(QtWidgets.QStyledItemDelegate):
             target = QtCore.QRect(QtCore.QPoint(), pixmap.size().scaled(option.rect.size() - QtCore.QSize(8, 8), QtCore.Qt.KeepAspectRatio))
             target.moveCenter(option.rect.center())
             painter.drawPixmap(target, pixmap)
+        if is_marked(index):
+            paint_marked(painter, option.rect.adjusted(2, 2, -2, -2), label=False)
         painter.restore()
 
 

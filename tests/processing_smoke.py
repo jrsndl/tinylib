@@ -19,7 +19,7 @@ source_root = root / 'testdata/demolib/fire/Big_Fire_01/main'
 sequence = str(source_root / 'Big_Fire_01.####.exr') + ' 1001-1003'
 media = {k: {'mode': 'generate'} for k in ['proxy', 'thumb', 'filmstrip']}
 job = make_manifest(settings, library, 'Three frames', 'test', sequence, ['fire', 'smoke'],
-                    'ACES - ACEScg', 'ACES to Rec.709', media, fps=23.976, preview_source='proxy')
+                    'ACES - ACEScg', 'ACES to Rec.709', media, fps=23.976)
 path = save_manifest(job, test_root / 'jobs')
 record = process(path, access=settings['_access'])
 sequence_record = record

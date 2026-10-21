@@ -11,6 +11,26 @@ DEFAULT_FIELDS = {
     'acquire_price': 'eur 0', 'acquire_author': '', 'acquire_usage': '', 'acquire_note': '',
 }
 MULTILINE_FIELDS = {'ingest_note', 'acquire_usage', 'acquire_note'}
+LABEL_MAX = 200
+
+
+def display_name(asset):
+    """What the interface shows for an asset: its label, or its name when there is none.
+
+    ``name`` stays the name used at ingest, which also names the asset's folder.
+    Older assets have no ``label``; an empty one means the same.
+    """
+    label = asset.get('label')
+    return label.strip() if isinstance(label, str) and label.strip() else asset.get('name', '')
+
+
+def validate_label(value):
+    if not isinstance(value, str):
+        raise ValueError('The label must be text.')
+    if re.search(r'[\r\n\t]', value):
+        raise ValueError('The label must be one line.')
+    if len(value) > LABEL_MAX:
+        raise ValueError('The label can be at most %d characters.' % LABEL_MAX)
 
 
 def apply_defaults(record):
@@ -25,6 +45,8 @@ def field_capability(key):
 
 
 def validate_fields(record):
+    if 'label' in record:
+        validate_label(record['label'])
     for key, default in DEFAULT_FIELDS.items():
         if key not in record:
             continue

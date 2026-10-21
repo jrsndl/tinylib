@@ -19,11 +19,13 @@ from .action_ui import ActionPicker
 from .player import Player
 from .tile_text import DEFAULT_TEMPLATE, TOKENS, validate_template
 from .properties_ui import PropertiesEditor
-from .asset_edit import writable_library, save_asset, save_assets
+from .asset_edit import DeleteStopped, writable_library, save_asset, save_assets, delete_assets
+from .delete_ui import DeleteDialog
 from .edit_lock import (LibraryEditLocked, acquire_edit_lock, locked_message,
                         release_edit_lock)
 from .path_format import FORMATS, format_assets
 from .asset_types import ASSET_TYPES
+from .asset_fields import display_name
 from .library import Library
 from .thumbnail_cache import prune_cache
 from .log import configure as configure_logging, log_path
@@ -60,11 +62,15 @@ class StarButton(QtWidgets.QPushButton):
 
 
 class NumericFilter(QtWidgets.QWidget):
+    """Label, operator (Any, >, <, =) and a number. The number is always editable:
+    typing one while the operator is Any switches to ``typed_operator``."""
     changed = QtCore.Signal()
 
-    def __init__(self, label, maximum, decimals=0, parent=None, tooltip='', width=80):
+    def __init__(self, label, maximum, decimals=0, parent=None, tooltip='', width=80, typed_operator='>'):
         super().__init__(parent)
         self.setToolTip(tooltip)  # Carries the unit; the label stays short.
+        self.typed_operator = typed_operator
+        self._resetting = False
         layout = QtWidgets.QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(QtWidgets.QLabel(label))
@@ -74,18 +80,40 @@ class NumericFilter(QtWidgets.QWidget):
         self.value = QtWidgets.QDoubleSpinBox()
         self.value.setDecimals(decimals)
         self.value.setRange(0, maximum)
-        self.value.setEnabled(False)
         self.value.setFixedWidth(width)
         self.value.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
         self.value.setObjectName('filterValue')
+        self.value.setToolTip(tooltip + ('. ' if tooltip else '') +
+                              'Type a number; with Any, the operator becomes %s.' % typed_operator)
         layout.addWidget(self.operator)
         layout.addWidget(self.value)
         self.operator.currentIndexChanged.connect(self.update_operator)
-        self.value.valueChanged.connect(lambda *_: self.changed.emit())
+        self.value.valueChanged.connect(self.value_changed)
+        self.update_operator()
 
     def update_operator(self, *_):
-        self.value.setEnabled(bool(self.operator.currentData()))
-        self.changed.emit()
+        # The number stays editable; with Any it is only dimmed, as it does not filter.
+        self.value.setStyleSheet('' if self.operator.currentData() else 'color: #8a8a8a;')
+        if not self._resetting:
+            self.changed.emit()
+
+    def value_changed(self, *_):
+        if self._resetting:
+            return
+        if not self.operator.currentData():
+            # Typing a number means filtering by it; this also emits changed.
+            self.operator.setCurrentIndex(self.operator.findData(self.typed_operator))
+        else:
+            self.changed.emit()
+
+    def reset(self):
+        self._resetting = True
+        try:
+            self.operator.setCurrentIndex(0)
+            self.value.setValue(0)
+        finally:
+            self._resetting = False
+        self.update_operator()
 
     def rule(self):
         return self.operator.currentData(), self.value.value()
@@ -118,6 +146,7 @@ class Browser(QtWidgets.QWidget):
         self.assets, self.errors = [], []
         self.edit_mode = False
         self.edit_session = None
+        self.marked_for_delete = {}  # asset_key -> asset, deleted on Write after confirmation
         self._restoring_edit_selection = False
         self.selection_source = 'main'
         self._filtering = False
@@ -154,6 +183,12 @@ class Browser(QtWidgets.QWidget):
         self.edit_button.setCheckable(True)
         self.edit_button.setEnabled(False)
         self.edit_button.clicked.connect(self.toggle_edit)
+        # Shown only while editing with a selection: marks the selected assets; Write deletes them.
+        self.delete_button = QtWidgets.QPushButton('Delete')
+        self.delete_button.setToolTip('Mark the selected assets for deletion. Write asks you to confirm.')
+        self.delete_button.clicked.connect(self.toggle_delete_marks)
+        self.delete_button.hide()
+        actions_bottom.addWidget(self.delete_button)
         # Shown only while editing, directly beside the red Write button it pairs with.
         self.cancel_edit_button = QtWidgets.QPushButton('Cancel edit')
         self.cancel_edit_button.setToolTip('Discard your changes and leave edit mode.')
@@ -315,7 +350,7 @@ class Browser(QtWidgets.QWidget):
         row = QtWidgets.QHBoxLayout()
         self.length_filter = NumericFilter('Length', 1000000, 3, tooltip='Length in seconds (frames ÷ frame rate)', width=80)
         self.width_filter = NumericFilter('Width', 1000000, tooltip='Width in pixels', width=64)
-        self.stars_filter = NumericFilter('Stars', 5, tooltip='Star rating, 0 to 5', width=36)
+        self.stars_filter = NumericFilter('Stars', 5, tooltip='Star rating, 0 to 5', width=36, typed_operator='=')
         for widget in (self.length_filter, self.width_filter, self.stars_filter):
             row.addWidget(widget)
         row.addSpacing(16)
@@ -360,10 +395,10 @@ class Browser(QtWidgets.QWidget):
         self.collection_toggle.setCheckable(True)
         self.collection_toggle.toggled.connect(self.toggle_collections)
         row.addWidget(self.collection_toggle)
-        self.details_toggle = QtWidgets.QPushButton('Details')
+        self.details_toggle = QtWidgets.QPushButton('Properties')
         self.details_toggle.setCheckable(True)
         self.details_toggle.setChecked(self.preferences.data.get('display', {}).get('details_panel', True))
-        self.details_toggle.setToolTip('Show or hide the asset details panel.')
+        self.details_toggle.setToolTip('Show or hide the asset properties panel.')
         row.addWidget(self.details_toggle)
         self.caption_button = QtWidgets.QPushButton('Tile text…')
         self.caption_button.clicked.connect(self.configure_tile_text)
@@ -420,6 +455,9 @@ class Browser(QtWidgets.QWidget):
         self.properties.access = self.access
         self.properties.cancel_requested.connect(self.cancel_edit)
         self.properties.hide()
+        # Editing one asset, its label is typed where the heading is.
+        details.insertWidget(details.indexOf(self.detail_title) + 1, self.properties.label_field)
+        self.properties.label_editing.connect(lambda editing: self.detail_title.setVisible(not editing))
         details.addWidget(self.properties, 1)
         self.preview_button = QtWidgets.QPushButton('Open preview')
         self.preview_button.clicked.connect(self.preview)
@@ -444,8 +482,7 @@ class Browser(QtWidgets.QWidget):
         self.search.clear()
         self.kind.setCurrentIndex(0)
         for widget in (self.length_filter, self.width_filter, self.stars_filter):
-            widget.operator.setCurrentIndex(0)
-            widget.value.setValue(0)
+            widget.reset()
         self.filter()
 
     def reload(self, use_index_cache=True):
@@ -708,6 +745,9 @@ class Browser(QtWidgets.QWidget):
                 self.edit_mode = False
                 self._set_edit_button(False)
                 self._freeze_for_edit(False)
+                if self.marked_for_delete:
+                    self._clear_delete_marks()
+                    self.status.setText('Edit mode ended; the assets marked for deletion were unmarked.')
         asset = assets[0] if assets else None
         for button in (self.preview_button, self.clear_stars, *self.star_buttons):
             button.setEnabled(bool(asset))
@@ -727,6 +767,7 @@ class Browser(QtWidgets.QWidget):
                        {asset_key(a) for a in assets} ==
                        {asset_key(a) for a in self.edit_session['originals']})
         self.edit_button.setEnabled(self.edit_mode or editing or editable)
+        self.update_delete_button(assets)
         self.properties.set_assets(assets if same_type else [], editing, editable)
         for value, button in enumerate(self.star_buttons, 1):
             button.set_filled(value <= rating)
@@ -737,11 +778,18 @@ class Browser(QtWidgets.QWidget):
             self.detail_image.setText('Select assets')
             return
         self.preview_button.setEnabled(len(assets) == 1)
-        self.detail_title.setText(asset['name'].replace('_', ' ') if len(assets) == 1 else '%d assets selected' % len(assets))
-        self.detail_title.setToolTip(asset['name'])
+        if len(assets) == 1:
+            label = display_name(asset)
+            # Without a label, the name reads better with spaces; a label is shown as typed.
+            self.detail_title.setText(asset['name'].replace('_', ' ') if label == asset['name'] else label)
+            self.detail_title.setToolTip(asset['name'] if label == asset['name'] else
+                                         '%s\nIngest name: %s' % (label, asset['name']))
+        else:
+            self.detail_title.setText('%d assets selected' % len(assets))
+            self.detail_title.setToolTip('')
         if len(assets) > 1:
             self.detail_text.setPlainText('Stars: ' + ('Mixed' if len(ratings) > 1 else str(rating)) +
-                                         '\n\n' + '\n'.join(a['name'] for a in assets))
+                                         '\n\n' + '\n'.join(display_name(a) for a in assets))
         self.update_detail_image()
 
     def _set_edit_button(self, editing):
@@ -750,6 +798,8 @@ class Browser(QtWidgets.QWidget):
         self.edit_button.blockSignals(False)
         self.edit_button.setText('Write' if editing else 'Edit')
         self.cancel_edit_button.setVisible(editing)
+        if not editing:
+            self.delete_button.hide()
         self.edit_button.setStyleSheet(
             'QPushButton { background: #a62828; border-color: #ef5b5b; color: white; font-weight: bold; }'
             if editing else '')
@@ -783,7 +833,7 @@ class Browser(QtWidgets.QWidget):
                 self.details_toggle.setChecked(True)  # Editing happens in the details panel.
             self.begin_edit()
         else:
-            self.write_edit()
+            self.write_pressed()
 
     def begin_edit(self):
         assets = self.selected_assets()
@@ -797,6 +847,16 @@ class Browser(QtWidgets.QWidget):
         self.edit_mode = True
         self._set_edit_button(True)
         self._freeze_for_edit(True)
+        self.update_delete_button()
+
+    def _acquire_edit_lock(self, library):
+        """The library's edit lock; an administrator may take over someone else's."""
+        try:
+            return acquire_edit_lock(library['root'], self.access.identity)
+        except LibraryEditLocked as error:
+            if not self.access.is_admin or not self.confirm_edit_override(error.locks):
+                raise
+            return acquire_edit_lock(library['root'], self.access.identity, override=True)
 
     def _activate_edit_assets(self, originals, selection_source):
         handles = {}
@@ -807,13 +867,7 @@ class Browser(QtWidgets.QWidget):
                 library = writable_library(self.settings, self.access, original)
                 libraries[root_key(library['root'])] = library
             for key, library in sorted(libraries.items()):
-                try:
-                    handle = acquire_edit_lock(library['root'], self.access.identity)
-                except LibraryEditLocked as error:
-                    if not self.access.is_admin or not self.confirm_edit_override(error.locks):
-                        raise
-                    handle = acquire_edit_lock(library['root'], self.access.identity, override=True)
-                handles[key] = handle
+                handles[key] = self._acquire_edit_lock(library)
         except Exception as error:
             for handle in handles.values():
                 release_edit_lock(handle)
@@ -840,6 +894,7 @@ class Browser(QtWidgets.QWidget):
             return False
         self.edit_session = None
         if not keep_mode:
+            self._clear_delete_marks()
             self.edit_mode = False
             self._set_edit_button(False)
             self._freeze_for_edit(False)
@@ -875,9 +930,159 @@ class Browser(QtWidgets.QWidget):
         if self._release_edit_session():
             self.status.setText('Edit cancelled; library lock released.')
 
+    # --- Deleting assets: marked in edit mode, confirmed and deleted on Write ---
+
+    def update_delete_button(self, assets=None):
+        assets = self.selected_assets() if assets is None else assets
+        self.delete_button.setVisible(self.edit_mode and bool(assets) and self.access.is_admin)
+        marked = bool(assets) and all(asset_key(asset) in self.marked_for_delete for asset in assets)
+        self.delete_button.setText('Undo delete' if marked else 'Delete')
+        self.delete_button.setToolTip('Keep the selected assets.' if marked else
+                                      'Mark the selected assets for deletion. Write asks you to confirm.')
+
+    def toggle_delete_marks(self):
+        assets = self.selected_assets()
+        if not assets:
+            return
+        if not self.access.is_admin:
+            self.delete_button.hide()
+            return self.show_error('Only administrators can delete assets.')
+        try:
+            for asset in assets:
+                writable_library(self.settings, self.access, asset)
+        except PermissionError as error:
+            return self.show_error('Cannot delete from this library: ' + str(error))
+        keys = [asset_key(asset) for asset in assets]
+        if all(key in self.marked_for_delete for key in keys):
+            for key in keys:
+                self.marked_for_delete.pop(key, None)
+        else:
+            self.marked_for_delete.update(zip(keys, assets))
+        self._marks_changed()
+        count = len(self.marked_for_delete)
+        self.status.setText('%d asset(s) marked for deletion; Write asks you to confirm.' % count if count else
+                            'No assets marked for deletion.')
+
+    def _marks_changed(self):
+        keys = set(self.marked_for_delete)
+        for model in (self.model, self.collections.model):
+            model.marked_keys = keys
+        for view in (self.grid, self.table, self.collections.grid, self.collections.table):
+            view.viewport().update()
+        self.update_delete_button()
+
+    def _clear_delete_marks(self):
+        if self.marked_for_delete:
+            self.marked_for_delete.clear()
+            self._marks_changed()
+
+    def write_pressed(self):
+        """Write: delete the confirmed marked assets, then save the edited fields and leave edit mode."""
+        deleted = []
+        if self.marked_for_delete and not self.access.is_admin:
+            # Admin rights were removed (security file re-read) after the assets were marked.
+            self._clear_delete_marks()
+            self.show_error('Only administrators can delete assets; the marks were removed. '
+                            'Your other changes are written.')
+        if self.marked_for_delete:
+            deleted = self.confirm_and_delete()
+            if deleted is None:  # Cancelled or failed: stay in edit mode, marks kept.
+                self._set_edit_button(True)
+                return
+        had_session = self.edit_session is not None
+        if self.write_edit():
+            if deleted and not had_session:
+                self.loaded(self.assets)  # write_edit refreshes the views only after a session
+        elif deleted:
+            # Still editing (the draft did not validate): drop the deleted rows, keep the draft.
+            self._drop_deleted_rows(deleted)
+            self._restore_edit_selection()
+
+    def _drop_deleted_rows(self, deleted):
+        """Remove deleted assets from both views without committing the edit draft."""
+        keys = {asset_key(asset) for asset in deleted}
+        self._restoring_edit_selection = True
+        try:
+            self.model.replace([asset for asset in self.model.assets if asset_key(asset) not in keys])
+            for key in keys:
+                self.collections.lookup.pop(key, None)
+            self.collections.refresh()
+        finally:
+            self._restoring_edit_selection = False
+
+    def _forget_deleted(self, deleted):
+        keys = {asset_key(asset) for asset in deleted}
+        self.assets[:] = [asset for asset in self.assets if asset_key(asset) not in keys]
+        if self.edit_session:
+            # The edited fields of a deleted asset are dropped with it.
+            self.edit_session['originals'] = [asset for asset in self.edit_session['originals']
+                                              if asset_key(asset) not in keys]
+        for key in keys:
+            self.marked_for_delete.pop(key, None)
+        self._marks_changed()
+
+    def confirm_and_delete(self):
+        """Show the confirmation window and delete what stays checked.
+
+        Returns the deleted assets, or None when the user cancelled or deletion failed.
+        """
+        dialog = DeleteDialog(list(self.marked_for_delete.values()), self.cache, self)
+        if not exec_dialog(dialog):
+            return None
+        chosen, remove_files = dialog.confirmed_assets(), dialog.remove_files()
+        if not chosen:
+            self._clear_delete_marks()
+            return []
+        tokens = {key: handle['token'] for key, handle in (self.edit_session or {}).get('locks', {}).items()}
+        temporary = []
+        try:
+            self.access.refresh()
+            for asset in chosen:
+                library = writable_library(self.settings, self.access, asset)
+                key = root_key(library['root'])
+                if key not in tokens:
+                    # Marked earlier in a library this edit session no longer holds.
+                    handle = self._acquire_edit_lock(library)
+                    temporary.append(handle)
+                    tokens[key] = handle['token']
+            problems = delete_assets(self.settings, self.access, chosen, tokens, remove_files=remove_files)
+        except DeleteStopped as error:
+            # Some libraries were written before one failed: show those as deleted, keep the rest marked.
+            self._forget_deleted(error.deleted)
+            self._drop_deleted_rows(error.deleted)
+            self.show_error('Deleted %d asset(s), then deletion stopped: %s\nThe other assets are still marked.'
+                            % (len(error.deleted), error) + ('\n\n' + '\n'.join(error.problems) if error.problems else ''))
+            return None
+        except Exception as error:
+            self.show_error('Nothing was deleted: %s' % error)
+            return None
+        finally:
+            for handle in temporary:
+                try:
+                    release_edit_lock(handle)
+                except Exception as error:
+                    self.show_error('Could not remove the library lock: ' + str(error))
+        self._forget_deleted(chosen)
+        self._clear_delete_marks()  # unchecked assets are kept and unmarked
+        if not remove_files:
+            self.status.setText('Deleted %d asset(s) from the database; their files were kept.' % len(chosen))
+        else:
+            self.status.setText('Deleted %d asset(s) from the database and storage%s.'
+                                % (len(chosen), '; some files were kept' if problems else ''))
+        if problems:
+            box = QtWidgets.QMessageBox(self)
+            box.setWindowTitle('TinyLib · Deleted with notes')
+            box.setIcon(QtWidgets.QMessageBox.Warning)
+            box.setText('The assets were deleted from the database. Some files were kept:')
+            box.setDetailedText('\n'.join(problems))
+            box.setInformativeText('\n'.join(problems[:5]) + ('\n…' if len(problems) > 5 else ''))
+            exec_dialog(box)
+        return chosen
+
     def write_edit(self, selection_change=False, next_asset=None, next_source=None, next_assets=None):
         if not self.edit_session:
             if not selection_change:
+                self._clear_delete_marks()
                 self.edit_mode = False
                 self._set_edit_button(False)
                 self._freeze_for_edit(False)
@@ -1093,7 +1298,7 @@ class Browser(QtWidgets.QWidget):
                     current['_rating'] = stars
             self.collections.populate()
             self.filter()
-            self.status.setText('Set %s to %d star%s.' % (asset.get('name', 'asset'), stars, '' if stars == 1 else 's'))
+            self.status.setText('Set %s to %d star%s.' % (display_name(asset), stars, '' if stars == 1 else 's'))
         except Exception as error:
             self.show_error(str(error))
 
@@ -1102,9 +1307,9 @@ class Browser(QtWidgets.QWidget):
             self.preferences.set_trim(asset, trim, asset.get('_trim_collection'))
             where = ' in the collection' if asset.get('_trim_collection') else ''
             if trim:
-                self.status.setText('Set %s in/out to %d–%d%s.' % (asset.get('name', 'asset'), trim[0], trim[1], where))
+                self.status.setText('Set %s in/out to %d–%d%s.' % (display_name(asset), trim[0], trim[1], where))
             else:
-                self.status.setText('Cleared %s in/out%s.' % (asset.get('name', 'asset'), where))
+                self.status.setText('Cleared %s in/out%s.' % (display_name(asset), where))
         except Exception as error:
             self.show_error(str(error))
 

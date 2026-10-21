@@ -35,7 +35,7 @@ The filtering panel combines:
 - **Search**: all terms must match; put `!` before a term to exclude it (`!burst`, `!"big burst"`, `{tags}!fire`);
 - **Pick tag…**, which adds `{tags}:<tag>` to the search (several picked tags must all match);
 - media type;
-- duration in seconds, pixel width and star count. Numeric filters offer `>`, `<` and `=`; select **Any** to disable a rule.
+- duration in seconds, pixel width and star count. Numeric filters offer `>`, `<` and `=`; select **Any** to disable a rule. Typing a number while the operator is **Any** turns the rule on: `>` for length and width, `=` for stars.
 
 Duration is frame count divided by frame rate, including fractional rates. Stills have duration zero. Assets without duration or width metadata are excluded only while that numeric filter is enabled. Library, category, media type and keyword filters combine with search. **Clear filters** keeps the selected library or category.
 
@@ -55,7 +55,7 @@ Selection is kept when switching views. Use Ctrl-click, Shift-click or Ctrl+A fo
 
 **Tile text…** sets the captions, up to six lines, using literal `\n` or real new lines. Tokens:
 
-`{name}`, `{library}`, `{category}`, `{type}`, `{colorspace}`, `{tags}`, `{width}`, `{height}`, `{fps}`, `{length}` (seconds), `{first}`, `{last}`
+`{name}` (the label, if the asset has one), `{ingest_name}` (always the name used at ingest), `{library}`, `{category}`, `{type}`, `{colorspace}`, `{tags}`, `{width}`, `{height}`, `{fps}`, `{length}` (seconds), `{first}`, `{last}`
 
 Example: `{name}\n{width} × {height}`. The default is `{name}\n{type} · {width} × {height}`. Missing values show as `—`. Both settings are saved in your preferences; a studio `tile_template` provides the initial template.
 
@@ -81,7 +81,7 @@ Star ratings are personal. The five stars in the top controls set the rating of 
 
 ## Collections
 
-**Collections** opens a scratchpad between the main view and properties. It starts hidden every time. **Details**, to its right, shows or hides the asset details panel; it is on by default, TinyLib remembers your choice, and **Edit** shows the panel again.
+**Collections** opens a scratchpad between the main view and properties. It starts hidden every time. **Properties**, to its right, shows or hides the asset properties panel; it is on by default, TinyLib remembers your choice, and **Edit** shows the panel again.
 
 - Create collections with **New** (collection01, collection02, …), rename or delete them. Deleting a collection never deletes media.
 - Drag a main-view selection onto the collection list. With no collections, the first one is created automatically. Duplicate picks in one collection are ignored.
@@ -142,6 +142,7 @@ The right panel shows descriptive fields, not media file paths. Read-only identi
 With an asset selected in a writable library, administrators and users with that library's edit permission can click **Edit** to change color space, keywords and metadata. The button turns into a red **Write** button.
 
 - **Write** saves the draft and leaves edit mode. **Cancel edit**, which appears beside **Write** while editing, discards it.
+- The heading above the fields becomes the **label**, prefilled with the name. Type a new label to rename the asset in the browser: tiles, the details view, the panel heading, players and Nuke Read nodes show the label instead of the name. The **Name** field keeps the name used at ingest, which also names the asset's folder, so nothing on disk is renamed. Set the label back to the name, or clear it, to show the name again. Search finds assets by label and by name. Labels are edited one asset at a time, never in multiedit.
 - Selecting another asset saves the current draft automatically and keeps edit mode on. Moving within one library keeps the same lock; unchanged selection jumps write nothing. Moving to another library switches to that library's lock.
 - If validation or writing fails, TinyLib returns to the edited selection and keeps the draft so you can correct or cancel it.
 - If edit mode cannot start (for example, someone else holds the lock), TinyLib leaves edit mode after one message.
@@ -159,12 +160,26 @@ Select several assets of the same type and click **Edit**. Editable text fields 
 
 Library edit locks are kept while switching selections. An invalid draft returns you to the original selection for correction.
 
+### Delete
+
+Deleting is for administrators only; other users don't see the button. While editing, select one or more assets and click **Delete**, left of **Cancel edit**. The assets are only marked: their previews get a red veil and their rows turn red and struck through. Marks stay while you select other assets; click **Undo delete** with marked assets selected to unmark them. **Cancel edit** drops all marks.
+
+**Write** then opens a confirmation window that lists the marked assets like the details view, each with a checked **Delete** box. Uncheck an asset to keep it. Choose:
+
+- **Delete from database only** (the default): the assets leave the library; their files stay where they are.
+- **Delete from storage and database**: also deletes each asset's folder, `<library>/<category>/<name>`. This cannot be undone. TinyLib never deletes a folder that is not exactly that, that holds another asset, or anything outside it; such files are kept and listed after the deletion.
+
+**Cancel** returns to edit mode with the marks kept. Deleting needs administrator rights and edit permission on the asset's library (both checked again when you confirm), and takes that library's edit lock if it is not already held. If an asset changed in the database since you loaded it, nothing in that library is deleted and TinyLib asks you to refresh. A library without `tinylib_data.json` lists its folders on disk and has no database to delete from; move or delete its folders instead. TinyLib never follows a link or junction when deleting files. Collections keep a deleted asset as unavailable.
+
 ## Ingest
 
 **+ Ingest asset** opens the ingest form if you may ingest into at least one writable library. The form is not modal: the browser and the submission progress windows stay usable while it is open, and reopening it brings the existing form forward.
 
 1. Choose a writable destination library and an asset type. Footage is the default. TinyLib supports Still, Footage, Model, Folder, Splat, PDF and Material. A 360 image or clip is a Still or Footage with `is_equirectangular` enabled. See [asset types and metadata](asset-types.md) for each type's representations and fields.
-2. Choose an existing main category, or enable **Create new** and type a name to publish into a new top-level category folder.
+2. Choose the main category:
+   - **Pick existing**: one of the library's categories.
+   - **Create new**: type a name to publish into a new top-level category folder.
+   - **From main folder**: the name of the folder 1, 2 or 3 levels above the main file. For `c:\ingest\fire\mains\assetA.####.exr`, 1 level up is `mains` and 2 levels up is `fire`. The form shows the result.
 3. Choose or drop the main source. The form accepts files and folders dropped from the OS. For Footage, choosing one frame of a sequence detects the contiguous sequence and writes it as `name.####.exr 1001-1100`; choosing a folder switches to [folder batch](#footage-folder-ingest). Missing frames and extensions outside the selected type are rejected.
 4. TinyLib fills the asset name (the file name without extension, sequence counter and `v###` token) and lowercase keywords (split at separators and CamelCase). It never overwrites a name or keywords you typed.
 5. Set the main color space, the frame rate for footage, and optionally a highres source where the type supports it.
@@ -181,14 +196,31 @@ Library edit locks are kept while switching selections. An invalid draft returns
 
 Generated previews are available for Still and Footage; other types need a supplied JPEG thumbnail. Previews are fitted with black padding, keeping aspect ratio. Supplied previews must already be Rec.709: the worker checks dimensions, video frame count and frame rate, but cannot tell whether an untagged JPEG has the right color transform. Main and highres color is declared, not converted; supply ACEScg EXRs for the studio's usual main format.
 
-The generated thumbnail and filmstrip can come from main or from the proxy. A proxy source is already display-referred and is not passed through OCIO again. Short clips repeat sampled frames to make exactly 24 tiles. The processing profile decides the thumbnail frame: the largest file (an approximation of the most active frame, as in the old scripts) or the middle frame.
+For Footage, what the farm does depends on what you supply:
+
+| You supply | The farm |
+| --- | --- |
+| Main only, EXR | Makes proxy, thumbnail and filmstrip in one vfx-transcode run; each frame is converted once. |
+| Main and proxy | Takes the generated thumbnail and filmstrip from the proxy with FFmpeg. The proxy is already display-referred and is not passed through OCIO again. vfx-transcode is not used. |
+| Main only, display-referred (a movie such as MOV or MP4, or a PNG, TIFF, DPX or JPG sequence) | Converts the main to scene-linear EXRs in the worker's temp folder (a movie via 16-bit PNGs), using the main color space you chose, then continues as for an EXR main. |
+
+The highres is never converted. The main is never changed either; the scene-linear EXRs are only used to make the previews. Short clips repeat sampled frames to make exactly 24 tiles. The processing profile decides the thumbnail frame: the busiest frame (the largest converted file) or the middle frame.
 
 **Review job** shows the exact processing manifest. **Save job manifest** exports it for inspection or local execution with `python worker.py path\to\manifest.json`. **Submit to Deadline** sends one job; its ID and manifest location are shown when Deadline confirms. Manifests are prepared in the background, so the form stays responsive while network folders are read. Refresh the browser after the job completes; the browser does not poll Deadline.
 
 ### Footage folder ingest
 
-With the Footage type, choosing a folder as Main switches the form to folder batch, which submits the whole folder. Choose the destination library, main category, source folder, main color space, processing profile, and whether previews come from main or proxy.
+With the Footage type, choosing a folder as Main switches the form to folder batch, which submits the whole folder. Choose the destination library, main category, source folder, main color space and processing profile. **From main folder** sets each asset's category from its own main file.
 
-Submission recursively finds every image sequence and container and creates a separate Deadline job for each. Asset names and keywords come from file names; frame rate and type metadata come from probing each source. Proxy, thumbnail and filmstrip are always generated, and highres is skipped.
+Submission recursively finds every image sequence and container and creates a separate Deadline job for each. Asset names and keywords come from file names; frame rate and type metadata come from probing each source.
+
+Proxies, highres, thumbnails and filmstrips that already exist are paired with their mains. Choose where they are in **Components are in**:
+
+- **Separate folder structure**: each component has its own folder, for example `c:\ingest\fire\mains`, `c:\ingest\fire\proxies` and `c:\ingest\fire\highres`. Choose `mains` as Main and the other folders in the Proxy, Highres, Thumb and Filmstrip rows.
+- **Same folder structure**: the components are among the mains. Enter a regular expression per component, matched against file names (a sequence by its first frame), for example `^.*\.mp4$` for proxies and `^.*_8K.*\.exr$` for highres. Files a component regex matches are not ingested as mains.
+
+Leave a row empty to leave that component unpaired. A component pairs with the main whose clean file name (no folder, extension, frame counter or the separator before it) it equals or starts with: `assetA.1001.exr` pairs with `proxies/assetA.mp4` and `highres/assetA_8K.1001.exr`. If several mains match, the longest name wins. A component that matches no main, or a main with two candidates for the same component, stops the batch with a list of the files. Use **Review job** to check the pairing before submitting.
+
+Each asset then follows the table above: with a paired proxy, the thumbnail and filmstrip come from it; without one, everything is generated from the main. Paired highres, thumbnails and filmstrips are used as they are.
 
 All manifests are prepared before any job is submitted. A missing frame rate, duplicate automatic names, invalid sources or existing destination assets are reported before anything is submitted. The background progress window lists each confirmed Job ID and keeps those IDs if a later submission fails. The form stays reusable during submission.

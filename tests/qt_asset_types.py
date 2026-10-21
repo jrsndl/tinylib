@@ -27,8 +27,9 @@ with tempfile.TemporaryDirectory() as temporary:
     assert values == ['Still', 'Footage', 'Model', 'Folder', 'Splat', 'PDF', 'Material'], values
     assert dialog.kind.currentData() == 'footage'
     assert dialog.new_category_name.text() == ''
-    dialog.new_category.setChecked(True)
-    assert not dialog.category.isEnabled() and dialog.new_category_name.isEnabled()
+    dialog.category_mode.setCurrentIndex(dialog.category_mode.findData('new'))
+    assert dialog.category.isHidden() and not dialog.new_category_name.isHidden()
+    assert dialog.selected_category() == ''
     for frame in (1001, 1002):
         (root / ('MyBigFire_v001.%04d.exr' % frame)).touch()
     dialog.source_selected(str(root / 'MyBigFire_v001.1001.exr'))

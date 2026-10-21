@@ -4,7 +4,7 @@ import json
 import re
 from .qt import QtCore, QtWidgets
 from .preferences import asset_key
-from .asset_fields import DEFAULT_FIELDS, MULTILINE_FIELDS, apply_defaults
+from .asset_fields import DEFAULT_FIELDS, LABEL_MAX, MULTILINE_FIELDS, apply_defaults
 
 
 def visible_metadata(key, value):
@@ -14,6 +14,8 @@ def visible_metadata(key, value):
 
 class PropertiesEditor(QtWidgets.QWidget):
     cancel_requested = QtCore.Signal()
+    # True while the label field stands in for the panel heading (editing one asset).
+    label_editing = QtCore.Signal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -25,6 +27,15 @@ class PropertiesEditor(QtWidgets.QWidget):
         self.editing = False
         self.fields = {}
         self.access = None
+        # The asset's label, edited in place of the panel heading; the owner places it there.
+        # Prefilled with the name; left as the name or emptied, the asset keeps no label.
+        self.label_field = QtWidgets.QLineEdit(self)  # parented, so it never opens as its own window
+        self.label_field.setObjectName('label')
+        self.label_field.setMaxLength(LABEL_MAX)
+        self.label_field.setMinimumHeight(34)
+        self.label_field.setToolTip('Label shown instead of the name. The name stays, '
+                                    'and still names the asset folder. Empty: show the name.')
+        self.label_field.hide()
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         scroll = QtWidgets.QScrollArea()
@@ -130,6 +141,7 @@ class PropertiesEditor(QtWidgets.QWidget):
             if key == 'range':
                 field.setVisible(asset.get('kind') == 'footage')
                 self.summary.labelForField(field).setVisible(asset.get('kind') == 'footage')
+        self.label_field.setText(str(asset.get('label') or '').strip() or asset.get('name', ''))
         self.metadata.setRowCount(0)
         for key, value in asset.get('metadata', {}).items():
             if not visible_metadata(key, value) or not self.field_allowed(key):
@@ -228,6 +240,11 @@ class PropertiesEditor(QtWidgets.QWidget):
 
     def set_editing(self, editing):
         self.editing = bool(editing and self.asset)
+        # A label names one asset, so it is never multiedited.
+        label = (self.editing and len(self.assets) == 1 and self.field_allowed('label')
+                 and self.label_field.parentWidget() is not self)  # shown once the owner has placed it
+        self.label_field.setVisible(label)
+        self.label_editing.emit(label)
         for key, field in self.fields.items():
             enabled = self.editing and key not in ('name', 'library', 'category', 'kind', 'range') and self.field_allowed(key)
             if len(self.assets) > 1 and not isinstance(field, (QtWidgets.QLineEdit, QtWidgets.QPlainTextEdit)):
@@ -256,6 +273,11 @@ class PropertiesEditor(QtWidgets.QWidget):
                                 if key == 'tags' else text if key in MULTILINE_FIELDS else text.strip())
             return updated
         updated = {'colorspace': self.fields['colorspace'].text().strip()}
+        label = self.label_field.text().strip()
+        if self.field_allowed('label'):
+            updated['label'] = '' if label == self.asset.get('name', '') else label
+            if not updated['label'] and not self.asset.get('label'):
+                del updated['label']  # No label before, none now: older assets stay unchanged.
         updated['tags'] = list(dict.fromkeys(tag.strip() for tag in re.split(r'[,\r\n]+', self.fields['tags'].toPlainText()) if tag.strip()))
         metadata = copy.deepcopy(self.asset.get('metadata', {}))
         for row in range(self.metadata.rowCount()):

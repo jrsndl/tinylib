@@ -3,6 +3,9 @@ import copy
 import os
 import re
 import shlex
+import shutil
+import stat
+import sys
 from pathlib import Path
 from .search import parse_query, matches_fields
 # Storage helpers live in storage.py; re-exported because many modules import them from here.
@@ -340,6 +343,101 @@ class Library:
             atomic_json(self.root / DATABASE_FILENAME, document)
         return updated
 
+    def asset_folder(self, asset):
+        """The folder TinyLib ingest made for ``asset``: ``<root>/<category>/<name>``.
+
+        Returns ``(folder, '')`` with the folder as spelled under the library root, or
+        ``(None, reason)`` when deleting it could reach anything else: a name or category
+        that is empty or leaves the library, a folder or category that is a symbolic link
+        or junction, or an asset whose main is not in exactly that folder (older or
+        hand-made layouts).
+        """
+        name, category = str(asset.get('name', '')), str(asset.get('category', ''))
+        if not name.strip() or not category.strip() or {name, category} & {'.', '..'} \
+                or re.search(r'[\\/]', name + category):
+            return None, 'its name or category is not a plain folder name'
+        folder = self.root / category / name
+        for item in (folder.parent, folder):
+            if is_link(item):
+                return None, '%s is a link or junction' % item
+        root = _resolved(self.root)
+        resolved = _resolved(folder)
+        main = Path(str(asset.get('main', '')))
+        expected = _resolved(main.parent if asset.get('kind') == 'folder' else main.parent.parent)
+        if resolved.parent.parent != root or expected != resolved:
+            return None, 'its files are not in %s/<category>/<name>' % self.root
+        return folder, ''
+
+    def delete_assets(self, originals, edit_token=None, remove_files=False):
+        """Remove assets from the database in one locked write; optionally their folders.
+
+        Every asset must still be in the database exactly as loaded, or nothing is
+        written. Files are deleted only after the database write succeeded, and only an
+        asset's own ``<root>/<category>/<name>`` folder, when no asset that stays has its
+        main in, at or above that folder (compared after resolving links, drive mappings
+        and short names). Returns messages about files that were kept or not deleted.
+        """
+        database = self.root / DATABASE_FILENAME
+        if not database.exists():
+            raise ValueError('%s has no %s: it lists the asset folders on disk, so there is no database to '
+                             'delete from. Move or delete the folders instead.' % (self.root, DATABASE_FILENAME))
+        problems, folders = [], []
+        with library_lock(self.root):
+            from .edit_lock import assert_edit_write_allowed
+            assert_edit_write_allowed(self.root, edit_token)
+            document = read_json(database)
+            if document.get('schema_version') == 3:
+                records = document['assets']
+                keys = [(record['id'], self.resolve(record.get('main', ''))) for record in records]
+            else:
+                # Legacy database: read fresh, never from the local index cache.
+                records = [self.portable(asset) for asset in self.load(use_cache=False)]
+                keys = [(asset['id'], asset['main']) for asset in self.assets]
+            doomed = set()
+            for original in originals:
+                rows = [row for row, key in enumerate(keys) if key == (original['id'], original['main'])]
+                if len(rows) > 1:
+                    raise ValueError('%s is in the database %d times; fix the duplicates first.'
+                                     % (original.get('name', original['id']), len(rows)))
+                if not rows:
+                    raise ValueError('%s changed or disappeared. Refresh the library before deleting.'
+                                     % original.get('name', original['id']))
+                doomed.add(rows[0])
+            if remove_files:
+                kept = [_resolved(key[1]) for row, key in enumerate(keys) if row not in doomed and key[1]]
+                for original in originals:
+                    folder, reason = self.asset_folder(original)
+                    if folder is not None:
+                        resolved = _resolved(folder)
+                        # A kept main in the folder, the folder itself, or an ancestor of it.
+                        if any(main == resolved or resolved in main.parents or main in resolved.parents
+                               for main in kept):
+                            folder, reason = None, 'another asset is stored there'
+                    if folder is None:
+                        problems.append('%s: files kept, %s.' % (original['name'], reason))
+                        continue
+                    folders.append((original, folder))
+                    for role in ('highres', 'proxy', 'thumb', 'filmstrip', 'scene'):
+                        path = original.get(role)
+                        if path and resolved not in _resolved(path).parents:
+                            problems.append('%s: %s kept, it is outside the asset folder: %s'
+                                            % (original['name'], role, path))
+            remaining = [record for row, record in enumerate(records) if row not in doomed]
+            if document.get('schema_version') != 3:
+                backup = self.root / 'data.legacy.backup.json'
+                if not backup.exists():
+                    with open(backup, 'xb') as stream:
+                        stream.write(database.read_bytes())
+                document = {'schema_version': 3, 'asset_type_schema_version': 1}
+            document['assets'] = remaining
+            atomic_json(database, document)
+        for original, folder in folders:
+            failed = remove_tree(folder)
+            if failed:
+                problems.append('%s: could not delete %d item(s) in %s, e.g. %s'
+                                % (original['name'], len(failed), folder, failed[0]))
+        return problems
+
     def publish(self, record, staging=None, edit_token=None):
         """Reread under lock and append one completed asset to the current database.
 
@@ -382,6 +480,48 @@ class Library:
                 raise
 
 
+def _resolved(path):
+    """``path`` with links, junctions, drive mappings and short names resolved, as far as it exists."""
+    try:
+        return Path(path).resolve()
+    except (OSError, RuntimeError):
+        return Path(os.path.abspath(path))
+
+
+def is_link(path):
+    """A symbolic link, or on Windows a junction or other reparse point."""
+    path = Path(path)
+    try:
+        if path.is_symlink() or (hasattr(path, 'is_junction') and path.is_junction()):
+            return True
+        attributes = getattr(os.lstat(path), 'st_file_attributes', 0)
+    except OSError:
+        return False
+    return bool(attributes & 0x400)  # FILE_ATTRIBUTE_REPARSE_POINT
+
+
+def remove_tree(folder):
+    """Delete ``folder`` (never following links); returns the paths that could not be deleted.
+
+    Read-only files, common on Windows shares, are made writable and retried once.
+    """
+    failed = []
+
+    def retry(function, path, error):
+        try:
+            os.chmod(path, stat.S_IWRITE | stat.S_IREAD | (stat.S_IEXEC if os.path.isdir(path) else 0))
+            function(path)
+        except OSError:
+            failed.append(str(path))
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(folder, onexc=retry)
+    else:
+        shutil.rmtree(folder, onerror=lambda function, path, info: retry(function, path, info[1]))
+    if not failed and Path(folder).exists():
+        failed.append(str(folder))
+    return failed
+
+
 def matches(asset, query='', category='', kind='', tag=''):
     if category and not (asset['category'] == category or asset['category'].startswith(category + '/')):
         return False
@@ -390,7 +530,7 @@ def matches(asset, query='', category='', kind='', tag=''):
     tags = [str(t).casefold() for t in asset.get('tags', [])]
     if tag and tag.casefold() not in tags:
         return False
-    haystack = ' '.join([asset.get('name', ''), asset.get('category', ''), asset.get('library', ''), *tags]).casefold()
+    haystack = ' '.join([asset.get('name', ''), str(asset.get('label') or ''), asset.get('category', ''), asset.get('library', ''), *tags]).casefold()
     query, field_clauses = parse_query(query)
     if not matches_fields(asset, field_clauses):
         return False

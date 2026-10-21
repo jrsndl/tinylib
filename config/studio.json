@@ -43,17 +43,6 @@
         "{input_colorspace}",
         "{output_colorspace}"
       ]
-    },
-    "VFX Transcode \u2014 Rec.709": {
-      "proxy_backend": "vfx_transcode",
-      "ocio_config": "${OCIO}",
-      "thumbnail_frame": "largest",
-      "output_colorspace": "Output - Rec.709",
-      "color_args": [
-        "--colorconvert",
-        "{input_colorspace}",
-        "{output_colorspace}"
-      ]
     }
   },
   "deadline": {

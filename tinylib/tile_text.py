@@ -2,9 +2,11 @@
 from functools import lru_cache
 import string
 from .filters import duration
+from .asset_fields import display_name
 
 DEFAULT_TEMPLATE = r'{name}\n{type} · {width} × {height}'
-TOKENS = ('name', 'library', 'category', 'type', 'colorspace', 'tags', 'width', 'height', 'fps', 'length', 'first', 'last')
+# {name} shows the label when the asset has one; {ingest_name} is always the name used at ingest.
+TOKENS = ('name', 'ingest_name', 'library', 'category', 'type', 'colorspace', 'tags', 'width', 'height', 'fps', 'length', 'first', 'last')
 
 
 def validate_template(template):
@@ -28,7 +30,7 @@ def render_template(template, asset):
     metadata = asset.get('metadata', {})
     seconds = duration(asset)
     values = {key: asset.get(key) for key in TOKENS}
-    values.update(type=asset.get('kind', 'still').upper(), tags=', '.join(asset.get('tags', [])),
+    values.update(name=display_name(asset), ingest_name=asset.get('name'), type=asset.get('kind', 'still').upper(), tags=', '.join(asset.get('tags', [])),
                   width=metadata.get('width'), height=metadata.get('height'), fps=metadata.get('frame_rate', metadata.get('FPS')),
                   length='%.2f' % seconds if seconds is not None else None)
     return validate_template(template).format_map({key: '—' if value is None else str(value).replace('\n', ' ').replace('\r', ' ') for key, value in values.items()})
