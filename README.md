@@ -11,7 +11,7 @@ python launch.py --demo
 
 The demo reads `testdata/demolib/tinylib_data.json`, remaps its old legacy absolute paths, and discovers the three flat HDRI asset folders. It does not rewrite the sample database. Some database entries have no corresponding sample files and show “Preview unavailable”. Both demo libraries are read-only.
 
-For a production browser, run `python launch.py` or load it inside Nuke. Python 3.9+ and the matching PySide binding are required; Nuke supplies its own Qt runtime.
+Before the first start, copy `tinylib.ini.example` to `tinylib.ini` and add yourself with `python -m tinylib.admin add-user "<your account>"` (see [security setup](docs/security.md)). Without it, TinyLib starts with no access. For a production browser, run `python launch.py` or load it inside Nuke. Python 3.9+ and the matching PySide binding are required; Nuke supplies its own Qt runtime.
 
 On Windows, double-click `launch_studio.bat` to use `config/studio.local.json` when present, otherwise `config/studio.json`. The launcher uses `.venv/Scripts/python.exe` if available, then Python on PATH, or the Windows Python launcher (`py -3`). Startup errors remain visible in the console.
 
@@ -82,7 +82,7 @@ The previous external player remains available with `"player_backend": "ffplay"`
 
 ## Windows identity and studio actions
 
-TinyLib uses the current Windows login without a password prompt. The first user receives all four default groups. Admin and user group assignments, plus studio defaults and per-library overrides for visibility, ingest, edit, actions and protected field groups, are stored in the studio configuration. Admins edit these through **Access rights…**. Unknown users have no access until assigned.
+TinyLib uses the current Windows login without a password prompt. Users, groups, studio defaults and per-library overrides for visibility, ingest, edit, actions and protected field groups are stored in the studio security file. `tinylib.ini` in the app folder names that file, and Windows file permissions decide who may change it. Admins edit it through **Access rights…** or `python -m tinylib.admin`. There is no automatic first administrator, and unknown users have no access until assigned. See [security setup](docs/security.md).
 
 Administrators also have **Library tools** beneath the library/category tree. **Library crosscheck…** checks every path listed in the selected library's `tinylib_data.json`, including sequence frames and relative texture/file lists, then scans each `library/category/asset` folder for assets absent from JSON. A progress dialog shows the active record or path. The completed report is saved in the Windows Downloads folder as `<library name>_ccrosscheck_<datetime>.log`.
 
@@ -170,7 +170,7 @@ python worker.py path\to\manifest.json
 
 1. Deploy this package and `worker.py` to a farm-accessible shared folder.
 2. Set `deadline.worker_script` and `deadline.spool_root` in the studio configuration to existing shared paths. They are deliberately empty in the workstation configuration until the studio deployment paths are chosen.
-3. Ensure the Deadline Python plugin has the configured Python version (default 3.10). Set pool/group/priority as needed. Point each tool and OCIO config to paths available to workers.
+3. Ensure the Deadline Python plugin has the configured Python version (default 3.10). Set pool/group/priority as needed. Workers use tool paths and processing profiles from their own configuration (the `config` in `tinylib.ini`, or `TINYLIB_CONFIG` on the worker), never from the job manifest. Point each tool and OCIO config there to paths available to workers.
 4. Source media, destination libraries and the spool must be accessible to the worker account. Prefer UNC paths over mapped drives. This implementation targets a Windows farm; cross-platform path mapping is not implemented.
 5. Use “Submit to Deadline”. One Python task copies the main/highres data, generates representations, validates them, and publishes the asset. The submitted job ID and manifest location are shown in the dialog.
 

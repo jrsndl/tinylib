@@ -1,0 +1,18 @@
+# Copy to tinylib.ini in this folder (beside menu.py and worker.py).
+# Only administrators should be able to write this folder and the security file.
+# See docs/security.md.
+
+[tinylib]
+# Users, groups, libraries and grants. Artists: read. Admins: write.
+# Relative paths resolve beside this file. Environment variables are not expanded.
+security = //studio/pipeline/tinylib/security.json
+
+# Optional default browser configuration (tools, colour spaces, profiles, Deadline).
+# TINYLIB_CONFIG or launch.py --config can still choose another browser config;
+# nothing can choose another security file.
+config = //studio/pipeline/tinylib/studio.json
+
+# Local development: use the repository's own configuration as the security file,
+# then run:  python -m tinylib.admin add-user <your account>
+# security = config/studio.json
+# config = config/studio.json

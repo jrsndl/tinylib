@@ -242,7 +242,7 @@ class IngestDialog(QtWidgets.QDialog):
         self.library = IngestComboBox()
         for library in settings['libraries']:
             access = settings.get('_access')
-            if not library.get('read_only') and (not access or (access.can(library['root'], 'view') and access.can(library['root'], 'ingest'))):
+            if not library.get('read_only') and not (access and access.read_only(library['root'])) and (not access or (access.can(library['root'], 'view') and access.can(library['root'], 'ingest'))):
                 self.library.addItem(library['name'], library)
         form.addRow('Destination library', self.library)
 

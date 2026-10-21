@@ -107,7 +107,7 @@ def make_manifest(settings, library, name, category, source, tags, colorspace,
     access = settings.get('_access') or AccessControl(settings)
     access.refresh()
     access.require(library['root'], 'ingest')
-    if library.get('read_only'):
+    if library.get('read_only') or access.read_only(library['root']):
         raise ValueError('This library is configured read-only.')
     name, category = safe_component(name), safe_component(category)
     root = Path(library['root'])
@@ -172,7 +172,7 @@ def make_manifest(settings, library, name, category, source, tags, colorspace,
         'ingest_user': access.identity, 'ingest_date': datetime.datetime.now().strftime('%Y%m%d'),
         'extension_groups': extension_groups(settings),
         'media': media, 'preview_source': preview_source,
-        'profile': copy.deepcopy(settings.get('profiles', {}).get(profile, {})),
+        'profile': copy.deepcopy(settings.get('profiles', {}).get(profile, {})), 'profile_name': profile,
         'tools': copy.deepcopy(settings.get('tools', {}))
     }
 

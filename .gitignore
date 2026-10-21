@@ -5,3 +5,6 @@ testdata/
 executables/
 oldscripts/
 config/*.local.json
+.venv/
+# Per-install pointer to the studio security file; see tinylib.ini.example
+tinylib.ini

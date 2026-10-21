@@ -20,7 +20,9 @@ temporary = tempfile.TemporaryDirectory()
 folder = Path(temporary.name)
 config = folder / 'studio.json'
 atomic_json(config, {'libraries': [{'name': 'Private', 'root': str(folder / 'must-not-be-read')}],
-                     'action_roots': [str(root / 'actions')]})
+                     'action_roots': [str(root / 'actions')],
+                     'access': {'groups': ['admins', 'managers', 'users', 'restricted'],
+                                'users': {'test\\admin': ['admins']}}})
 admin = AccessControl({'_config_path': str(config)}, identity='test\\admin')
 dialog = AccessDialog(admin, ActionRegistry([root / 'actions']))
 dialog.add_user('test\\guest', ['restricted'])

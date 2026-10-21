@@ -406,9 +406,11 @@ class Browser(QtWidgets.QWidget):
         except Exception as error:
             configs = []
             self.status.setText('Cannot read studio permissions: ' + str(error))
+        if self.access.error:
+            self.status.setText(self.access.error)
         self.player.stop()
         self.registry.reload()
-        self.ingest_button.setEnabled(any(not library.get('read_only') and self.access.can(library['root'], 'ingest') for library in configs))
+        self.ingest_button.setEnabled(any(not (library.get('read_only') or self.access.read_only(library['root'])) and self.access.can(library['root'], 'ingest') for library in configs))
         self.access_button.setVisible(self.access.is_admin)
         self.library_tools_button.setVisible(self.access.is_admin)
         self.loader = Loader(configs, self, use_index_cache=use_index_cache)
@@ -474,6 +476,8 @@ class Browser(QtWidgets.QWidget):
         except Exception as error:
             assets = []
             errors = errors + ['Cannot read studio permissions: ' + str(error)]
+        if self.access.error:
+            errors = [self.access.error] + errors
         self.assets, self.errors = assets, errors + self.registry.errors
         for asset in assets:
             asset['_rating'] = self.preferences.rating(asset)
@@ -542,6 +546,8 @@ class Browser(QtWidgets.QWidget):
         self._filtering = False
         self.selection()
         error = '  ·  %d library error(s) — see tooltip' % len(self.errors) if self.errors else ''
+        if self.access.error:
+            error = '  ·  ' + self.access.error
         self._asset_status = '%s assets / %s total · %s picked%s' % (len(result), len(self.assets), len(picked), error)
         self.preview_progress(self.cache.snapshot())
 
@@ -683,7 +689,7 @@ class Browser(QtWidgets.QWidget):
             widget.setEnabled(not editing)
         if not editing:
             self.ingest_button.setEnabled(any(
-                not library.get('read_only') and self.access.can(library['root'], 'ingest')
+                not (library.get('read_only') or self.access.read_only(library['root'])) and self.access.can(library['root'], 'ingest')
                 for library in self.settings['libraries']))
 
     def confirm_edit_override(self, locks):
@@ -1052,7 +1058,7 @@ class Browser(QtWidgets.QWidget):
         current = self.categories.currentItem()
         root = current.data(0, QtCore.Qt.UserRole)[0] if current else ''
         libraries = [library for library in self.settings['libraries']
-                     if not library.get('read_only') and self.access.can(library['root'], 'view')
+                     if not (library.get('read_only') or self.access.read_only(library['root'])) and self.access.can(library['root'], 'view')
                      and self.access.can(library['root'], 'edit')]
         library = next((item for item in libraries if root_key(item['root']) == root_key(root)), None)
         if library is None:

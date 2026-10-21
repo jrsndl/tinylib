@@ -3,17 +3,17 @@ setlocal
 pushd "%~dp0"
 if errorlevel 1 exit /b 1
 
-rem TinyLib automatically prefers config\studio.local.json when it exists.
-set "TINYLIB_CONFIG=%~dp0config\studio.json"
+rem The browser configuration comes from tinylib.ini (config =), unless
+rem TINYLIB_CONFIG is already set. The security file always comes from tinylib.ini.
 
 if exist "%~dp0.venv\Scripts\python.exe" (
-    "%~dp0.venv\Scripts\python.exe" "%~dp0launch.py" --config "%TINYLIB_CONFIG%"
+    "%~dp0.venv\Scripts\python.exe" "%~dp0launch.py"
 ) else (
     where python >nul 2>nul
     if errorlevel 1 (
-        py -3 "%~dp0launch.py" --config "%TINYLIB_CONFIG%"
+        py -3 "%~dp0launch.py"
     ) else (
-        python "%~dp0launch.py" --config "%TINYLIB_CONFIG%"
+        python "%~dp0launch.py"
     )
 )
 

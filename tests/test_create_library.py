@@ -26,9 +26,14 @@ class CreateLibraryTests(unittest.TestCase):
                                'users': {'admin': ['admins'], 'user': ['users']},
                                'defaults': {'edit': ['managers']}}}
         atomic_json(self.config, document)
-        self.settings = load_settings(self.config)
-        self.access = AccessControl(self.settings, identity='admin')
+        self.load(self.config)
         self.root = self.folder / 'new'
+
+    def load(self, security):
+        install = self.folder / 'tinylib.ini'
+        install.write_text('[tinylib]\nsecurity = %s\n' % security.name, encoding='utf-8')
+        self.settings = load_settings(self.config, install=install)
+        self.access = AccessControl(self.settings, identity='admin')
 
     def create(self, **kwargs):
         return create_new_library(self.settings, self.access, 'New', str(self.root), **kwargs)
@@ -104,10 +109,7 @@ class CreateLibraryTests(unittest.TestCase):
         security = self.folder / 'security.json'
         data = read_json(self.config)
         atomic_json(security, data)
-        data['security_config'] = str(security)
-        atomic_json(self.config, data)
-        self.settings = load_settings(self.config)
-        self.access = AccessControl(self.settings, identity='admin')
+        self.load(security)
         new = self.create()
         self.assertEqual(read_json(security)['libraries'][-1], new)
         self.assertEqual(read_json(self.config)['libraries'][-1], new)
@@ -117,10 +119,7 @@ class CreateLibraryTests(unittest.TestCase):
         security = self.folder / 'security.json'
         data = read_json(self.config)
         atomic_json(security, data)
-        data['security_config'] = str(security)
-        atomic_json(self.config, data)
-        self.settings = load_settings(self.config)
-        self.access = AccessControl(self.settings, identity='admin')
+        self.load(security)
         before = copy.deepcopy(data)
         def write(path, value):
             if Path(path) == security:

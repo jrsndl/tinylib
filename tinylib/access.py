@@ -1,4 +1,9 @@
-"""OS account identity and group grants stored in the studio configuration."""
+"""OS account identity and group grants stored in the studio security file.
+
+The security file location comes only from tinylib.ini (see install.py). Its
+filesystem permissions are the real boundary: artists read it, administrators
+write it. TinyLib never writes it to create a first administrator.
+"""
 import copy
 import os
 from pathlib import Path
@@ -38,55 +43,100 @@ def default_permissions():
 CAPABILITIES = tuple(default_permissions())
 
 
+def _resolved_root(base, value):
+    text = os.path.expandvars(str(value))
+    path = Path(text)
+    return path if path.is_absolute() or text.startswith(('//', '\\\\')) else Path(base) / path
+
+
 class AccessControl:
+    """Group grants read from the studio security file named by tinylib.ini.
+
+    ``persist=True`` (every production entry point) rereads that file on each
+    refresh. A missing install, an unreadable or invalid file, or an empty user
+    table fails closed: ``error`` explains why and nothing is granted. Nothing
+    is written to create the first administrator; use
+    ``python -m tinylib.admin add-user``.
+
+    ``persist=False`` is an in-memory test mode built from ``settings``. When
+    that copy has no users, ``identity`` is seeded as an administrator in
+    memory only.
+    """
+
     def __init__(self, settings, identity=None, persist=True):
         self.identity = identity or windows_identity()
         self.persist = persist
-        self.path = Path(settings.get('_security_path') or settings['_config_path'])
+        self.error = None
+        self.groups = set()
+        if persist and settings.get('_security_error'):
+            location = None
+        else:
+            location = settings.get('_security_path') or settings.get('_config_path')
+        self.path = Path(location) if location else None
+        self._install_error = settings.get('_security_error') or 'No studio security file is configured.'
         self._memory = copy.deepcopy(settings)
-        self.refresh()
-        if not self.data.get('access', {}).get('users'):
-            if persist:
-                with library_lock(self.path.parent):
-                    self.data = read_json(self.path)
-                    if not self.data.get('access', {}).get('users'):
-                        self._bootstrap()
-                        atomic_json(self.path, self.data)
-            else:
-                self._bootstrap()
-                self._memory = copy.deepcopy(self.data)
+        if not persist:
+            access = self._memory.setdefault('access', {})
+            if not access.get('users'):
+                access['groups'] = list(access.get('groups') or DEFAULT_GROUPS)
+                access['users'] = {self.identity: list(DEFAULT_GROUPS)}
+                access.setdefault('defaults', {})
         self.refresh()
 
-    def _bootstrap(self):
-        defaults = copy.deepcopy(self.data.get('access', {}).get('defaults', {}))
-        self.data['access'] = {'groups': list(DEFAULT_GROUPS), 'users': {self.identity: list(DEFAULT_GROUPS)},
-                               'defaults': defaults}
-        for library in self.data.get('libraries', []):
-            library.setdefault('permissions', {})
+    def _deny(self, message):
+        self.error = message
+        self.groups = set()
+        self.data = {'access': {'groups': list(DEFAULT_GROUPS), 'users': {}, 'defaults': {}}, 'libraries': []}
 
     def refresh(self):
         self.groups = set()
-        self.data = read_json(self.path) if self.persist else copy.deepcopy(self._memory)
-        access = self.data.get('access', {})
-        if not isinstance(access, dict) or not isinstance(access.get('users', {}), dict):
-            raise ValueError('Invalid studio access configuration.')
-        users = {key.casefold(): value for key, value in access.get('users', {}).items()}
-        if any(not isinstance(value, list) or not all(isinstance(group, str) for group in value) for value in users.values()):
-            raise ValueError('User group assignments must be lists of group names.')
+        self.error = None
+        if not self.persist:
+            data = copy.deepcopy(self._memory)
+        elif self.path is None:
+            return self._deny(self._install_error)
+        else:
+            try:
+                data = read_json(self.path)
+            except FileNotFoundError:
+                return self._deny('Studio security file not found: %s' % self.path)
+            except (OSError, ValueError) as error:
+                return self._deny('Cannot read studio security file %s: %s' % (self.path, error))
+        problem = validate_security(data)
+        if problem:
+            return self._deny('Invalid studio security file %s: %s' % (self.path, problem))
+        users = {key.casefold(): value for key, value in data.get('access', {}).get('users', {}).items()}
+        if not users:
+            return self._deny('No users are configured in %s. An administrator must add the first account '
+                              'with: python -m tinylib.admin add-user' % self.path)
+        self.data = data
         self.groups = set(users.get(self.identity.casefold(), []))
+        if not self.groups:
+            self.error = 'Your account %s has no TinyLib access. Ask an administrator to add it.' % self.identity
+
+    @property
+    def security_dir(self):
+        return self.path.parent if self.path else Path('.')
 
     @property
     def is_admin(self):
         return 'admins' in self.groups
 
-    def policy(self, root):
+    def library(self, root):
+        """The security file's entry for ``root``, or None when it is not registered."""
         for library in self.data.get('libraries', []):
-            path = Path(os.path.expandvars(library['root']))
-            if not path.is_absolute():
-                path = self.path.parent / path
-            if root_key(path) == root_key(root):
-                return library.get('permissions', {})
-        return {}
+            if root_key(_resolved_root(self.security_dir, library['root'])) == root_key(root):
+                return library
+        return None
+
+    def policy(self, root):
+        library = self.library(root)
+        return library.get('permissions', {}) if library else {}
+
+    def read_only(self, root):
+        """read_only in the security file wins over any browser configuration."""
+        library = self.library(root)
+        return bool(library and library.get('read_only'))
 
     def defaults(self):
         return dict(default_permissions(), **self.data.get('access', {}).get('defaults', {}))
@@ -102,10 +152,8 @@ class AccessControl:
             raise ValueError('Unknown library capability.')
         if self.is_admin:
             return True
-        # Unregistered roots must never inherit studio grants.
-        registered = any(root_key(self.path.parent / os.path.expandvars(item['root'])) == root_key(root)
-                         for item in self.data.get('libraries', []))
-        if not registered:
+        # Libraries missing from the security file never receive grants.
+        if self.library(root) is None:
             return False
         policy = self.policy(root)
         grants = policy.get(capability, self.defaults().get(capability, []))
@@ -118,7 +166,7 @@ class AccessControl:
 
     def require(self, root, capability, action=None):
         if not self.can(root, 'view') or not self.can(root, capability, action):
-            raise PermissionError('Your groups do not permit %s%s for this library.' %
+            raise PermissionError(self.error or 'Your groups do not permit %s%s for this library.' %
                                   (capability, ' ' + action if action else ''))
 
     def save(self, users, groups, libraries, defaults=None):
@@ -151,8 +199,36 @@ class AccessControl:
             else:
                 self._memory = copy.deepcopy(self.data)
             self.refresh()
-        if self.persist:
+        if not self.persist:
+            return update()
+        if self.path is None:
+            raise PermissionError(self._install_error)
+        try:
             with library_lock(self.path.parent):
                 update()
-        else:
-            update()
+        except PermissionError as error:
+            if error.errno is None:  # Raised by TinyLib's own checks, not by Windows.
+                raise
+            raise PermissionError(security_write_denied(self.path)) from error
+
+
+def security_write_denied(path):
+    return ('Windows denied writing %s. Only accounts with write permission on the security file '
+            'can change access rights.' % path)
+
+
+def validate_security(data):
+    """Return a problem description, or None when the security document is usable."""
+    if not isinstance(data, dict):
+        return 'the top level must be a JSON object.'
+    access = data.get('access', {})
+    if not isinstance(access, dict) or not isinstance(access.get('users', {}), dict):
+        return '"access.users" must be an object.'
+    if any(not isinstance(value, list) or not all(isinstance(group, str) for group in value)
+           for value in access.get('users', {}).values()):
+        return 'user group assignments must be lists of group names.'
+    libraries = data.get('libraries', [])
+    if not isinstance(libraries, list) or any(not isinstance(item, dict) or not item.get('root')
+                                              for item in libraries):
+        return '"libraries" must be a list of objects that each have a root.'
+    return None

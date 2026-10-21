@@ -11,7 +11,7 @@ EDITABLE = {'colorspace', 'tags', 'metadata'} | set(DEFAULT_FIELDS)
 
 def writable_library(settings, access, asset):
     library = next((item for item in settings['libraries'] if root_key(item['root']) == root_key(asset['library_root'])), None)
-    if not library or library.get('read_only'):
+    if not library or library.get('read_only') or access.read_only(library['root']):
         raise PermissionError('This library is read-only.')
     access.require(library['root'], 'edit')
     return library

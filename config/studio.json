@@ -72,7 +72,7 @@
     "spool_root": ""
   },
   "action_roots": [
-    "../actions"
+    "{app}/actions"
   ],
   "access": {
     "groups": [

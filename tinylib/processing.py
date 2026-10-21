@@ -172,7 +172,23 @@ def validate_media(outputs, manifest):
                 print('Warning: proxy frame rate differs from ingest FPS; ingest will continue.')
 
 
-def process(manifest_path, access=None):
+def apply_worker_settings(job, settings):
+    """Executables and processing profiles come from the farm's own configuration.
+
+    A manifest is written by a workstation into a shared spool, so it may only
+    describe *what* to ingest, never which programs the farm runs.
+    """
+    job['tools'] = dict(settings.get('tools', {}))
+    name = job.get('profile_name')
+    profiles = settings.get('profiles', {})
+    if name in profiles:
+        job['profile'] = dict(profiles[name])
+    elif any(media.get('mode') == 'generate' for media in job.get('media', {}).values()):
+        raise ValueError('Processing profile %r is not configured on this worker.' % name)
+    return job
+
+
+def process(manifest_path, access=None, settings=None):
     job = read_json(manifest_path)
     if job.get('manifest_version') != 1:
         raise ValueError('Unsupported manifest version.')
@@ -180,10 +196,13 @@ def process(manifest_path, access=None):
     if access is None:
         from .access import AccessControl
         from .settings import load_settings
-        access = AccessControl(load_settings())
+        settings = settings or load_settings()
+        access = AccessControl(settings)
+    if settings is not None:
+        apply_worker_settings(job, settings)
     access.refresh()
     access.require(root, 'ingest')
-    if job['library'].get('read_only'):
+    if job['library'].get('read_only') or access.read_only(root):
         raise ValueError('Library is read-only.')
     name = safe_component(job['name'])
     category = safe_component(job['category'])

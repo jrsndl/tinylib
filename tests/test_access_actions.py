@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from tinylib.access import AccessControl, DEFAULT_GROUPS
 from tinylib.actions import ActionRegistry
 from tinylib.library import atomic_json
@@ -16,7 +17,9 @@ class AccessActionTests(unittest.TestCase):
         self.root = Path(temporary.name)
         self.path = self.root / 'studio.json'
         self.library = {'root': str(self.root / 'library'), 'name': 'Library'}
-        atomic_json(self.path, {'libraries': [self.library], 'tools': {'ffplay': 'ffplay'}})
+        atomic_json(self.path, {'libraries': [self.library], 'tools': {'ffplay': 'ffplay'},
+                                'access': {'groups': list(DEFAULT_GROUPS),
+                                           'users': {'studio\\first': list(DEFAULT_GROUPS)}}})
         self.admin = AccessControl({'_config_path': str(self.path)}, identity='studio\\first')
 
     def user(self, name='studio\\artist'):
@@ -24,7 +27,7 @@ class AccessActionTests(unittest.TestCase):
 
     def grant(self):
         libraries = copy.deepcopy(self.admin.data['libraries'])
-        libraries[0]['permissions']['actions'] = ['users']
+        libraries[0].setdefault('permissions', {})['actions'] = ['users']
         self.admin.save({'studio\\first': DEFAULT_GROUPS, 'studio\\artist': ['users', 'restricted']}, DEFAULT_GROUPS, libraries)
 
     def plugin(self):
@@ -36,8 +39,9 @@ class AccessActionTests(unittest.TestCase):
         (folder / 'action.py').write_text("from pathlib import Path\nPath(__file__).with_name('executed').touch()\ndef run(assets, context, config):\n    return [len(assets), context['identity'], config['value']]\n")
         return ActionRegistry([folder.parent]), folder
 
-    def test_first_user_and_group_union(self):
+    def test_group_union(self):
         self.assertEqual(self.admin.groups, set(DEFAULT_GROUPS))
+        self.assertIsNone(self.admin.error)
         self.assertTrue(self.admin.can('unlisted', 'action', 'anything'))
         self.assertFalse(self.user().can(self.library['root'], 'view'))
         self.grant()
@@ -76,9 +80,54 @@ class AccessActionTests(unittest.TestCase):
         data = json.loads(self.path.read_text())
         data['access']['users']['studio\\first'] = 'admins'
         atomic_json(self.path, data)
-        with self.assertRaises(ValueError):
-            self.admin.refresh()
+        self.admin.refresh()
         self.assertFalse(self.admin.is_admin)
+        self.assertIn('Invalid studio security file', self.admin.error)
+        self.assertFalse(self.admin.can(self.library['root'], 'view'))
+
+    def test_empty_user_table_fails_closed_and_is_never_written(self):
+        atomic_json(self.path, {'libraries': [self.library]})
+        before = self.path.read_bytes()
+        first = self.user('studio\\whoever')
+        self.assertFalse(first.is_admin)
+        self.assertFalse(first.can(self.library['root'], 'view'))
+        self.assertIn('No users are configured', first.error)
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_missing_install_fails_closed(self):
+        settings = {'_config_path': str(self.path), '_security_path': None,
+                    '_security_error': 'tinylib.ini is missing'}
+        access = AccessControl(settings, identity='studio\\first')
+        self.assertFalse(access.is_admin)
+        self.assertEqual(access.error, 'tinylib.ini is missing')
+        self.assertFalse(access.can(self.library['root'], 'view'))
+        with self.assertRaisesRegex(PermissionError, 'tinylib.ini is missing'):
+            access.save({'studio\\first': ['admins']}, DEFAULT_GROUPS, [])
+
+    def test_missing_security_file_fails_closed(self):
+        access = AccessControl({'_security_path': str(self.root / 'absent.json')}, identity='studio\\first')
+        self.assertFalse(access.is_admin)
+        self.assertIn('not found', access.error)
+
+    def test_unknown_account_gets_message(self):
+        self.assertIn('has no TinyLib access', self.user('studio\\stranger').error)
+
+    def test_windows_denied_write_is_reported(self):
+        denied = PermissionError(13, 'Access is denied')
+        with patch('tinylib.access.atomic_json', side_effect=denied):
+            with self.assertRaisesRegex(PermissionError, 'Windows denied writing'):
+                self.admin.save({'studio\\first': DEFAULT_GROUPS}, DEFAULT_GROUPS, self.admin.data['libraries'])
+        artist = {'studio\\first': DEFAULT_GROUPS, 'studio\\artist': ['users']}
+        with self.assertRaisesRegex(PermissionError, 'Only admins'):
+            self.user().save(artist, DEFAULT_GROUPS, [])
+
+    def test_security_read_only_wins(self):
+        data = json.loads(self.path.read_text())
+        data['libraries'][0]['read_only'] = True
+        atomic_json(self.path, data)
+        self.admin.refresh()
+        self.assertTrue(self.admin.read_only(self.library['root']))
+        self.assertFalse(self.admin.read_only(self.root / 'unlisted'))
 
     def test_collection_round_trip_and_invalid_import_is_atomic(self):
         prefs = Preferences(self.root / 'preferences.json')
