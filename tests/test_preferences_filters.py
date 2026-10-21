@@ -134,9 +134,11 @@ class PreferenceTests(unittest.TestCase):
                 self.prefs.create_collection()
         self.assertEqual(self.prefs.collections, [])
         self.path.write_text('invalid', encoding='utf-8')
-        with self.assertRaises(ValueError):
-            Preferences(self.path)
-        self.assertEqual(self.path.read_text(), 'invalid')
+        # Startup survives a damaged file; its content is kept aside, never overwritten.
+        recovered = Preferences(self.path)
+        self.assertIn('reset', recovered.warning)
+        aside = list(self.path.parent.glob('preferences.damaged-*.json'))
+        self.assertEqual([item.read_text() for item in aside], ['invalid'])
 
 
 if __name__ == '__main__':

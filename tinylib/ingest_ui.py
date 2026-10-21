@@ -3,7 +3,7 @@ import json
 import copy
 import threading
 from pathlib import Path
-from .qt import QtCore, QtWidgets
+from .qt import QtCore, QtWidgets, exec_dialog
 from .views import heading_font
 from .ingest import (clean_asset_name, keywords_from_name, make_manifest,
                      prepare_source, save_manifest, submit_deadline, make_folder_manifests)
@@ -170,6 +170,36 @@ class SubmissionWindow(QtWidgets.QDialog):
             super().closeEvent(event)
 
 
+def worker_arguments(args):
+    """Give a worker thread its own AccessControl: make_manifest refreshes it, and the GUI
+    thread must not see the shared one change half-way through a permission check."""
+    settings = dict(args[0])
+    if settings.get('_access') is not None:
+        settings['_access'] = copy.deepcopy(settings['_access'])
+    return (settings,) + tuple(args[1:])
+
+
+def build_manifest(args, batch):
+    """Pure function of the form values: safe to run in a worker thread."""
+    if batch:
+        return make_folder_manifests(args[0], args[1], args[3], args[4], args[6], args[7], args[11])
+    return make_manifest(*args)
+
+
+class Background(QtCore.QThread):
+    done = QtCore.Signal(object)
+
+    def __init__(self, work, parent):
+        super().__init__(parent)
+        self.work = work
+
+    def run(self):
+        try:
+            self.done.emit((self.work(), ''))
+        except Exception as error:
+            self.done.emit((None, str(error)))
+
+
 class MetadataScan(QtCore.QThread):
     done = QtCore.Signal(object)
 
@@ -209,6 +239,10 @@ class IngestDialog(QtWidgets.QDialog):
         self._scan_versions = {'main': 0, 'proxy': 0}
         self._scans = []
         self._submissions = []
+        self._background = []
+        self._last_source = None
+        self._auto_name = ''
+        self._auto_tags = ''
         self._category_request = 0
         self._categories_by_root = {}
         roots = {}
@@ -254,7 +288,8 @@ class IngestDialog(QtWidgets.QDialog):
 
         self.category = IngestComboBox()
         self.new_category = QtWidgets.QCheckBox('Create new')
-        self.new_category_name = QtWidgets.QLineEdit('foo')
+        self.new_category_name = QtWidgets.QLineEdit()
+        self.new_category_name.setPlaceholderText('New category name')
         self.new_category_name.setEnabled(False)
         category_widget = QtWidgets.QWidget()
         category_row = QtWidgets.QHBoxLayout(category_widget)
@@ -453,7 +488,10 @@ class IngestDialog(QtWidgets.QDialog):
             label.setVisible(visible)
 
     def source_selected(self, value):
-        self.invalidate_main()
+        # editingFinished fires on every focus change; only a real change re-reads the source.
+        if value and (value, self.kind.currentData()) == self._last_source:
+            return
+        self.invalidate_main()  # Also clears _last_source; set again once the source is valid.
         self._source_error = ''
         self._batch_folder = None
         self.set_batch_mode(False)
@@ -470,18 +508,28 @@ class IngestDialog(QtWidgets.QDialog):
                 return
             source = prepare_source(value, self.kind.currentData(), self.settings)
             self.source.edit.setText(source)
+            self._last_source = (source, self.kind.currentData())
             clean = clean_asset_name(source)
-            self.name.setText(clean)
-            self.tags.setText(', '.join(keywords_from_name(clean)))
+            # Fill name and keywords from the file name, but never overwrite what the user typed.
+            if not self.name.text().strip() or self.name.text() == self._auto_name:
+                self.name.setText(clean)
+                self._auto_name = clean
+            keywords = ', '.join(keywords_from_name(clean))
+            if not self.tags.text().strip() or self.tags.text() == self._auto_tags:
+                self.tags.setText(keywords)
+                self._auto_tags = keywords
             self.status.setText('Main source is valid for %s.' % ASSET_TYPES[self.kind.currentData()]['label'])
             if self.kind.currentData() == 'footage':
                 self.start_scan('main', source)
             self.scan_proxy()
         except Exception as error:
+            self._last_source = None
             self._source_error = str(error)
             self.error(self._source_error)
 
     def invalidate_main(self, *_):
+        # Any edit to the source text cancels the running scan, so the same text must be re-read.
+        self._last_source = None
         if self._batch_folder and self.source.text() != self._batch_folder:
             self._batch_folder = None
             self.set_batch_mode(False)
@@ -588,32 +636,69 @@ class IngestDialog(QtWidgets.QDialog):
             self.fps.value(), self.highres.text(), self.preview_source.currentText(), self.kind.currentData(), metadata)
 
     def manifest(self):
-        args = self.manifest_arguments()
-        if self._batch_folder:
-            return make_folder_manifests(self.settings, args[1], args[3], args[4], args[6], args[7], args[11])
-        return make_manifest(*args)
+        return build_manifest(self.manifest_arguments(), bool(self._batch_folder))
 
     def error(self, message):
         self.status.setText(message)
 
+    def in_background(self, work, done, message):
+        """Run network-heavy work (folder discovery, probing every source) off the GUI thread."""
+        if any(task.isRunning() for task in self._background):
+            return self.error('Still preparing the previous request...')
+        task = Background(work, self)
+        self._background.append(task)
+
+        def delivered(result):
+            value, error = result
+            if error:
+                self.error(error)
+            else:
+                done(value)
+
+        def finished():
+            # Only after run() has returned: deleting a QThread that is still running aborts Nuke.
+            self._background.remove(task)
+            task.deleteLater()
+        task.done.connect(delivered)
+        task.finished.connect(finished)
+        self.status.setText(message)
+        task.start()
+
     def review(self):
         try:
-            job = self.manifest()
+            # Read the form here, on the GUI thread; the worker only gets plain values.
+            args, batch = worker_arguments(self.manifest_arguments()), bool(self._batch_folder)
+        except Exception as error:
+            return self.error(str(error))
+        self.in_background(lambda: build_manifest(args, batch), self.show_review, 'Preparing job manifest(s)...')
+
+    def show_review(self, job):
+        try:
+            self.status.setText('')
             dialog = QtWidgets.QDialog(self)
+            dialog.setAttribute(QtCore.Qt.WA_DeleteOnClose)
             dialog.setWindowTitle('Review ingest job')
             dialog.resize(700, 600)
             layout = QtWidgets.QVBoxLayout(dialog)
             text = QtWidgets.QPlainTextEdit(json.dumps(job, indent=2))
             text.setReadOnly(True)
             layout.addWidget(text)
-            dialog.exec_() if hasattr(dialog, 'exec_') else dialog.exec()
+            exec_dialog(dialog)
         except Exception as error:
             self.error(str(error))
 
     def export(self):
         try:
-            job = self.manifest()
-            folder = QtWidgets.QFileDialog.getExistingDirectory(self, 'Save manifest folder')
+            args, batch = worker_arguments(self.manifest_arguments()), bool(self._batch_folder)
+        except Exception as error:
+            return self.error(str(error))
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self, 'Save manifest folder')
+        if folder:
+            self.in_background(lambda: build_manifest(args, batch), lambda job: self.save_manifests(job, folder),
+                               'Preparing job manifest(s)...')
+
+    def save_manifests(self, job, folder):
+        try:
             if folder:
                 paths = [save_manifest(item, folder) for item in job] if isinstance(job, list) else [save_manifest(job, folder)]
                 self.status.setText('Saved %d job manifest(s) to %s' % (len(paths), folder))
@@ -642,15 +727,5 @@ class IngestDialog(QtWidgets.QDialog):
         self.raise_()
         self.activateWindow()
 
-    def reject(self):
-        if self._scans:
-            self.status.setText('Waiting for metadata scans to finish...')
-            return
-        super().reject()
-
-    def closeEvent(self, event):
-        if self._scans:
-            self.status.setText('Waiting for metadata scans to finish...')
-            event.ignore()
-            return
-        super().closeEvent(event)
+    # Closing only hides the form; running scans finish in the background (tools time out after
+    # a minute) and their results land in the hidden form, which is reused by "Return to ingest form".

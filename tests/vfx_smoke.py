@@ -17,5 +17,10 @@ source = str(root / 'testdata/demolib/fire/Big_Fire_01/main/Big_Fire_01.####.exr
 job = make_manifest(settings, {'root': str(destination), 'name': 'VFX smoke'},
     'VFX test', 'fire', source, ['fire'], 'ACES - ACEScg', 'VFX Transcode — Rec.709',
     {k: {'mode': 'generate'} for k in ['proxy', 'thumb', 'filmstrip']}, fps=24, preview_source='main')
-process(save_manifest(job, destination / 'jobs'), access=settings['_access'])
+record = process(save_manifest(job, destination / 'jobs'), access=settings['_access'])
+for key in ('proxy', 'thumb', 'filmstrip'):
+    if not Path(record[key]).is_file():
+        raise SystemExit('VFX Transcode smoke failed: %s was not published (%s)' % (key, record[key]))
+if record['metadata']['duration_frames'] != 3:
+    raise SystemExit('VFX Transcode smoke failed: expected 3 frames, got %r' % record['metadata']['duration_frames'])
 print('VFX Transcode smoke passed.')

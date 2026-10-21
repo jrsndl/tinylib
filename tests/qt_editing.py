@@ -13,7 +13,7 @@ else:
     from PySide2.QtTest import QTest
 from tinylib.library import atomic_json, read_json
 from tinylib.edit_lock import acquire_edit_lock, read_edit_locks
-from tinylib.preferences import asset_key, Preferences
+from tinylib.preferences import Preferences
 from tinylib.path_format import format_assets
 from tinylib.ui import Browser
 from tinylib.views import STYLE, UI_FONT_FAMILY, UI_FONT_SIZE

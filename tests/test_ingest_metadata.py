@@ -7,13 +7,17 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from helpers import HAVE_QT, requires_qt
+
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
-from tinylib.qt import QtCore, QtGui, QtWidgets
-from tinylib.ingest_ui import IngestDialog
+if HAVE_QT:
+    from tinylib.qt import QtCore, QtGui, QtWidgets
+    from tinylib.ingest_ui import IngestDialog
 from tinylib.metadata_scan import scan_source_metadata
 from tinylib.processing import validate_media
 
 
+@requires_qt
 class IngestMetadataTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

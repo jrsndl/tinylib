@@ -1,0 +1,40 @@
+[project]
+name = "tinylib"
+version = "3.1.0"  # Keep in step with tinylib/__init__.py (a unit test checks).
+description = "Studio asset library for Nuke and standalone use, with a Deadline ingest worker."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []  # Inside Nuke, Nuke supplies Qt. Standalone, install one of the extras below.
+
+[project.optional-dependencies]
+# Nuke 16+ and new standalone installs.
+pyside6 = ["PySide6>=6.5"]
+# Nuke 15 (Python 3.10 at most; PySide2 has no wheels for newer Python).
+pyside2 = ["PySide2>=5.15"]
+dev = ["ruff>=0.6"]
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["tinylib"]
+
+[tool.setuptools.package-data]
+tinylib = ["*.qss"]
+
+[tool.ruff]
+line-length = 130
+target-version = "py39"
+extend-exclude = ["artifacts", "testdata", "executables", "oldscripts"]
+
+[tool.ruff.lint]
+# Correctness only: syntax errors, undefined names, unused imports and variables.
+select = ["E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# Script-style Qt tests put sys.path setup before their imports.
+"tests/qt_*.py" = ["E402"]
+"tests/*_smoke.py" = ["E402"]
+"tests/test_*.py" = ["E402"]
+"worker.py" = ["E402"]

@@ -26,7 +26,7 @@ with tempfile.TemporaryDirectory() as temporary:
     values = [dialog.kind.itemText(index) for index in range(dialog.kind.count())]
     assert values == ['Still', 'Footage', 'Model', 'Folder', 'Splat', 'PDF', 'Material'], values
     assert dialog.kind.currentData() == 'footage'
-    assert dialog.new_category_name.text() == 'foo'
+    assert dialog.new_category_name.text() == ''
     dialog.new_category.setChecked(True)
     assert not dialog.category.isEnabled() and dialog.new_category_name.isEnabled()
     for frame in (1001, 1002):
@@ -35,6 +35,10 @@ with tempfile.TemporaryDirectory() as temporary:
     assert dialog.source.text().endswith('MyBigFire_v001.####.exr 1001-1002')
     assert dialog.name.text() == 'MyBigFire'
     assert dialog.tags.text() == 'my, big, fire'
+    # A typed name survives re-selecting a source and changing the type.
+    dialog.name.setText('Hand typed')
+    dialog.source_selected(str(root / 'MyBigFire_v001.1002.exr'))
+    assert dialog.name.text() == 'Hand typed', dialog.name.text()
     dialog.kind.setCurrentIndex(dialog.kind.findData('model'))
     assert dialog.media['thumb'][0].currentText() == 'supply'
     assert dialog.media['proxy'][0].currentText() == 'omit'

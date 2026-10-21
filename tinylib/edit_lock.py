@@ -12,6 +12,9 @@ from datetime import datetime
 from pathlib import Path
 
 from .library import library_lock
+from .log import get_logger
+
+log = get_logger(__name__)
 
 
 class LibraryEditLocked(RuntimeError):
@@ -79,6 +82,7 @@ def acquire_edit_lock(root, identity, override=False):
                 if path.parent.resolve() != root.resolve() or not re.fullmatch(r'lock\..+\.txt', path.name):
                     raise RuntimeError('Refusing to remove an invalid edit lock path: ' + str(path))
                 path.unlink()
+                log.warning('%s removed edit lock of %s: %s', identity, item.get('identity'), path)
         token = uuid.uuid4().hex
         path = root / ('lock.%s.txt' % _safe_user(identity))
         record = {
@@ -95,6 +99,7 @@ def acquire_edit_lock(root, identity, override=False):
             os.fsync(fd)
         finally:
             os.close(fd)
+    log.info('%s acquired edit lock %s%s', identity, path, ' (override)' if override else '')
     return dict(record, path=str(path), root=str(root))
 
 

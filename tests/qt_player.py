@@ -1,6 +1,5 @@
 """Real decoding and Qt input tests for TinyLib's interactive review transport."""
 import hashlib
-import json
 import os
 import subprocess
 import sys
@@ -12,7 +11,7 @@ if QtCore.__name__.startswith('PySide6'):
     from PySide6.QtTest import QTest
 else:
     from PySide2.QtTest import QTest
-from tinylib.player import Player, sibling_tool
+from tinylib.player import Player
 from tinylib.settings import load_settings
 
 root = Path(__file__).resolve().parents[1]

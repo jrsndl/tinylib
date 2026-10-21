@@ -9,11 +9,20 @@ optionally the default browser configuration::
     security = //studio/pipeline/tinylib/security.json
     config   = //studio/pipeline/tinylib/studio.json
 
+    [tools]
+    ffmpeg   = C:/tools/ffmpeg/ffmpeg.exe
+    oiiotool = oiiotool
+
+``[tools]`` names the executables TinyLib runs (ffmpeg, ffprobe, ffplay, oiiotool,
+vfx_transcode). They override any ``tools`` in a browser configuration, and the
+farm worker uses them too, so only administrators decide which programs run.
+
 The security location is deliberately read only from this file. Environment
 variables, command-line options, ``*.local.json`` overrides and the
 ``security_config`` key cannot redirect it, and values are not expanded.
 """
 import configparser
+import re
 from pathlib import Path
 
 APP_ROOT = Path(__file__).resolve().parent.parent
@@ -31,7 +40,7 @@ def read_install(path=None):
     case ``security`` is None and callers must deny access.
     """
     path = Path(path) if path else install_path()
-    result = {'path': str(path), 'security': None, 'config': None, 'error': None}
+    result = {'path': str(path), 'security': None, 'config': None, 'tools': {}, 'error': None}
     if not path.is_file():
         result['error'] = ('TinyLib is not configured: %s is missing. Ask an administrator to create it '
                            '(see docs/security.md).' % path)
@@ -53,6 +62,19 @@ def read_install(path=None):
             location = Path(value)
             result[key] = str(location if location.is_absolute() or value.startswith(('//', '\\\\'))
                               else path.parent / location)
+    if parser.has_section('tools'):
+        result['tools'] = {name: tool_path(path.parent, value)
+                           for name, value in parser['tools'].items() if value.strip().strip('"')}
     if not result['security']:
         result['error'] = '%s does not set "security" to the studio security JSON.' % path
     return result
+
+
+def tool_path(base, value):
+    """A bare name ("ffmpeg") is found on PATH; a relative path resolves beside tinylib.ini."""
+    value = value.strip().strip('"')
+    if '/' not in value and '\\' not in value:
+        return value
+    if Path(value).is_absolute() or value.startswith(('//', '\\\\')) or re.match(r'^[A-Za-z]:[\\/]', value):
+        return value
+    return str((Path(base) / value.replace('\\', '/')).resolve())

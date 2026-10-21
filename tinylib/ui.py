@@ -2,8 +2,9 @@
 from pathlib import Path
 import math
 import json
+import threading
 import time
-from .qt import QtCore, QtGui, QtWidgets, HOSTED_IN_NUKE
+from .qt import QtCore, QtGui, QtWidgets, HOSTED_IN_NUKE, exec_dialog
 from .settings import load_settings
 from .preferences import Preferences, asset_key, COLLECTION_MIME
 from .filters import accepts
@@ -23,6 +24,8 @@ from .edit_lock import (LibraryEditLocked, acquire_edit_lock, locked_message,
 from .path_format import FORMATS, format_assets
 from .asset_types import ASSET_TYPES
 from .library import Library
+from .thumbnail_cache import prune_cache
+from .log import configure as configure_logging, log_path
 from .library_tools_ui import CrosscheckDialog, MetadataRescanDialog, LibrarySortDialog, CreateLibraryDialog
 
 
@@ -86,6 +89,7 @@ class NumericFilter(QtWidgets.QWidget):
 class Browser(QtWidgets.QWidget):
     def __init__(self, config_path=None, preferences_path=None, access=None):
         super().__init__()
+        configure_logging()
         self.settings = load_settings(config_path)
         self.access = access or AccessControl(self.settings)
         self.settings['_access'] = self.access
@@ -241,6 +245,13 @@ class Browser(QtWidgets.QWidget):
         self.animation.setInterval(85)
         self.animation.timeout.connect(self.animate)
         self.animation.start()
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            # closeEvent is not guaranteed when the host application quits.
+            app.aboutToQuit.connect(self.shutdown)
+        if self.preferences.warning:
+            QtCore.QTimer.singleShot(0, lambda: self.show_error(self.preferences.warning))
+        threading.Thread(target=prune_cache, args=(self.cache.disk_root,), daemon=True).start()
         self.reload()
 
     def make_filters(self, layout):
@@ -408,11 +419,13 @@ class Browser(QtWidgets.QWidget):
             self.status.setText('Cannot read studio permissions: ' + str(error))
         if self.access.error:
             self.status.setText(self.access.error)
-        self.player.stop()
+        # Open review players stay open; they hold their own copy of the asset.
         self.registry.reload()
         self.ingest_button.setEnabled(any(not (library.get('read_only') or self.access.read_only(library['root'])) and self.access.can(library['root'], 'ingest') for library in configs))
         self.access_button.setVisible(self.access.is_admin)
         self.library_tools_button.setVisible(self.access.is_admin)
+        if getattr(self, 'loader', None) is not None:
+            self.loader.deleteLater()  # Finished (checked above); don't keep one per Refresh.
         self.loader = Loader(configs, self, use_index_cache=use_index_cache)
         self.loader.progress.connect(self.library_progress)
         self.loader.loaded.connect(self.loaded)
@@ -465,9 +478,15 @@ class Browser(QtWidgets.QWidget):
     def update_status_tooltip(self):
         lines = list(getattr(self, 'errors', []))
         lines.append('Local thumbnail cache: ' + str(self.cache.disk_root))
+        if log_path():
+            lines.append('Log file: ' + str(log_path()))
         self.status.setToolTip('\n'.join(lines))
 
-    def loaded(self, assets, errors):
+    def loaded(self, assets, errors=None):
+        """Show loaded assets. errors=None keeps the last library load errors (after a save)."""
+        if errors is None:
+            errors = getattr(self, '_load_errors', [])
+        self._load_errors = list(errors)
         self.loading_timer.stop()
         self.status.setText('Building browser index for %d assets…' % len(assets))
         try:
@@ -526,24 +545,29 @@ class Browser(QtWidgets.QWidget):
         if self._filtering:
             return
         self._filtering = True
-        keys = {asset_key(a) for a in self.main_selected()}
-        selected = self.categories.currentItem()
-        root, category = selected.data(0, QtCore.Qt.UserRole) if selected else ('', '')
-        kind = self.kind.currentData()
-        picked = self.preferences.picked_keys()
-        result = [a for a in self.assets if (not root or a['library_root'] == root)
-                  and (not category or a['category'] == category or a['category'].startswith(category + '/'))
-                  and (not kind or a.get('kind') == kind)
-                  and asset_key(a) not in picked
-                  and accepts(a, self.search.text(), self.invert.isChecked(), self.tags.text().split(','),
-                              self.length_filter.rule(), self.width_filter.rule(), self.stars_filter.rule(), a['_rating'])]
-        self.grid.cards.hover_row = -1
-        self.model.replace(result)
-        selection = self.grid.selectionModel()
-        for row, asset in enumerate(result):
-            if asset_key(asset) in keys:
-                selection.select(self.model.index(row, 0), QtCore.QItemSelectionModel.Select | QtCore.QItemSelectionModel.Rows)
-        self._filtering = False
+        try:
+            keys = {asset_key(a) for a in self.main_selected()}
+            selected = self.categories.currentItem()
+            root, category = selected.data(0, QtCore.Qt.UserRole) if selected else ('', '')
+            kind = self.kind.currentData()
+            picked = self.preferences.picked_keys()
+            result = [a for a in self.assets if (not root or a['library_root'] == root)
+                      and (not category or a['category'] == category or a['category'].startswith(category + '/'))
+                      and (not kind or a.get('kind') == kind)
+                      and asset_key(a) not in picked
+                      and accepts(a, self.search.text(), self.invert.isChecked(), self.tags.text().split(','),
+                                  self.length_filter.rule(), self.width_filter.rule(), self.stars_filter.rule(), a['_rating'])]
+            self.grid.cards.hover_row = -1
+            self.model.replace(result)
+            selection = self.grid.selectionModel()
+            for row, asset in enumerate(result):
+                if asset_key(asset) in keys:
+                    selection.select(self.model.index(row, 0), QtCore.QItemSelectionModel.Select | QtCore.QItemSelectionModel.Rows)
+        except Exception as error:  # Never leave filtering disabled for the rest of the session.
+            self.status.setText('Filter failed: %s' % error)
+            return
+        finally:
+            self._filtering = False
         self.selection()
         error = '  ·  %d library error(s) — see tooltip' % len(self.errors) if self.errors else ''
         if self.access.error:
@@ -625,7 +649,7 @@ class Browser(QtWidgets.QWidget):
             return
         assets = self.selected_assets()
         if self.edit_mode and self.edit_session:
-            previous = self.edit_session.get('originals', [self.edit_session['original']])
+            previous = self.edit_session['originals']
             if {asset_key(a) for a in assets} != {asset_key(a) for a in previous}:
                 if not self.write_edit(selection_change=True, next_assets=assets,
                                        next_source=self.selection_source):
@@ -634,7 +658,11 @@ class Browser(QtWidgets.QWidget):
                 assets = self.selected_assets()
         same_type = bool(assets) and len({a.get('kind') for a in assets}) == 1
         if self.edit_mode and not self.edit_session and same_type:
-            self._activate_edit_assets(assets, self.selection_source)
+            if not self._activate_edit_assets(assets, self.selection_source):
+                # Leave write mode, or every later selection signal would retry and show the error again.
+                self.edit_mode = False
+                self._set_edit_button(False)
+                self._freeze_for_edit(False)
         asset = assets[0] if assets else None
         for button in (self.preview_button, self.clear_stars, *self.star_buttons):
             button.setEnabled(bool(asset))
@@ -652,7 +680,7 @@ class Browser(QtWidgets.QWidget):
                 editable = False
         editing = bool(self.edit_session and assets and
                        {asset_key(a) for a in assets} ==
-                       {asset_key(a) for a in self.edit_session.get('originals', [self.edit_session['original']])})
+                       {asset_key(a) for a in self.edit_session['originals']})
         self.edit_button.setEnabled(self.edit_mode or editing or editable)
         self.properties.set_assets(assets if same_type else [], editing, editable)
         for value, button in enumerate(self.star_buttons, 1):
@@ -700,7 +728,7 @@ class Browser(QtWidgets.QWidget):
         box.setInformativeText('As an administrator, you can delete the existing lock and take over editing.')
         override = box.addButton('Override lock', QtWidgets.QMessageBox.DestructiveRole)
         box.addButton(QtWidgets.QMessageBox.Cancel)
-        box.exec_() if hasattr(box, 'exec_') else box.exec()
+        exec_dialog(box)
         return box.clickedButton() is override
 
     def toggle_edit(self, checked):
@@ -721,9 +749,6 @@ class Browser(QtWidgets.QWidget):
         self.edit_mode = True
         self._set_edit_button(True)
         self._freeze_for_edit(True)
-
-    def _activate_edit_asset(self, original, selection_source):
-        return self._activate_edit_assets([original], selection_source)
 
     def _activate_edit_assets(self, originals, selection_source):
         handles = {}
@@ -759,7 +784,7 @@ class Browser(QtWidgets.QWidget):
         if not self.edit_session:
             return True
         try:
-            for handle in self.edit_session.get('locks', {'single': self.edit_session['lock']}).values():
+            for handle in self.edit_session['locks'].values():
                 release_edit_lock(handle)
         except Exception as error:
             self.properties.message.setText('Could not remove the library lock: ' + str(error))
@@ -781,7 +806,7 @@ class Browser(QtWidgets.QWidget):
         self._restoring_edit_selection = True
         try:
             source = self.edit_session.get('selection_source', 'main')
-            original_keys = {asset_key(a) for a in self.edit_session.get('originals', [self.edit_session['original']])}
+            original_keys = {asset_key(a) for a in self.edit_session['originals']}
             if source == 'collection':
                 model = self.collections.model
                 selection = self.collections.grid.selectionModel()
@@ -810,7 +835,7 @@ class Browser(QtWidgets.QWidget):
                 self._freeze_for_edit(False)
                 self.selection()
             return True
-        originals = self.edit_session.get('originals', [self.edit_session['original']])
+        originals = self.edit_session['originals']
         try:
             changes = self.properties.changes() if originals else {}
             if changes and len(originals) > 1:
@@ -860,7 +885,7 @@ class Browser(QtWidgets.QWidget):
         if selection_change:
             self.status.setText('Asset properties saved; write mode remains active.')
         else:
-            self.loaded(self.assets, [])
+            self.loaded(self.assets)
             self.status.setText('Asset properties saved.')
         return True
 
@@ -1010,7 +1035,8 @@ class Browser(QtWidgets.QWidget):
     def manage_access(self):
         try:
             dialog = AccessDialog(self.access, self.registry, self)
-            accepted = dialog.exec_() if hasattr(dialog, 'exec_') else dialog.exec()
+            accepted = exec_dialog(dialog)
+            dialog.deleteLater()
             if accepted:
                 self.player.stop()
                 self.reload()
@@ -1037,17 +1063,21 @@ class Browser(QtWidgets.QWidget):
                 return
             library = libraries[names.index(name)]
         dialog = CrosscheckDialog(library, self)
-        dialog.exec_() if hasattr(dialog, 'exec_') else dialog.exec()
-        if dialog.crosscheck_result:
-            self.status.setText('Library crosscheck saved: ' + dialog.crosscheck_result['log_path'])
+        exec_dialog(dialog)
+        result = dialog.crosscheck_result
+        dialog.deleteLater()
+        if result:
+            self.status.setText('Library crosscheck saved: ' + result['log_path'])
 
     def create_new_library(self):
         if not self.access.is_admin:
             return self.show_error('Library tools require an administrator account.')
         dialog = CreateLibraryDialog(self.settings, self.access, self)
-        dialog.exec_() if hasattr(dialog, 'exec_') else dialog.exec()
-        if dialog.created_library is not None:
-            self.settings['libraries'].append(dialog.created_library)
+        exec_dialog(dialog)
+        created = dialog.created_library
+        dialog.deleteLater()
+        if created is not None:
+            self.settings['libraries'].append(created)
             self.reload(use_index_cache=False)
 
     def library_sort(self):
@@ -1072,8 +1102,10 @@ class Browser(QtWidgets.QWidget):
                 return
             library = libraries[names.index(name)]
         dialog = LibrarySortDialog(library, self.settings, self.access, self)
-        dialog.exec_() if hasattr(dialog, 'exec_') else dialog.exec()
-        if dialog.sort_result is not None:
+        exec_dialog(dialog)
+        sorted_result = dialog.sort_result
+        dialog.deleteLater()
+        if sorted_result is not None:
             self.reload(use_index_cache=False)
 
     def rescan_metadata(self):
@@ -1104,9 +1136,11 @@ class Browser(QtWidgets.QWidget):
             self.show_error('No assets are available for metadata rescan.')
             return
         dialog = MetadataRescanDialog(assets, self.settings, self)
-        accepted = dialog.exec_() if hasattr(dialog, 'exec_') else dialog.exec()
-        if accepted and dialog.scan_result and dialog.scan_result['results']:
-            self.write_rescanned_metadata(dialog.scan_result['results'])
+        accepted = exec_dialog(dialog)
+        scan = dialog.scan_result
+        dialog.deleteLater()
+        if accepted and scan and scan['results']:
+            self.write_rescanned_metadata(scan['results'])
 
     def write_rescanned_metadata(self, results):
         groups = {}
@@ -1157,7 +1191,7 @@ class Browser(QtWidgets.QWidget):
                 asset.clear()
                 asset.update(updated)
                 asset.update(personal)
-        self.loaded(self.assets, [])
+        self.loaded(self.assets)
         self.status.setText('Updated metadata for %d asset(s).' % len(updated_assets))
 
     def ingest(self):
@@ -1165,9 +1199,18 @@ class Browser(QtWidgets.QWidget):
             from .ingest_ui import IngestDialog
             current = self.categories.currentItem()
             root, category = current.data(0, QtCore.Qt.UserRole) if current else ('', '')
-            dialog = IngestDialog(self.settings, self.assets, self,
-                                  library_root=root, category=category)
-            dialog.exec_() if hasattr(dialog, 'exec_') else dialog.exec()
+            existing = getattr(self, '_ingest_dialog', None)
+            if existing is not None:
+                # One form per browser, hidden or not, so "Return to ingest form" and the
+                # toolbar button always reach the same form and its running submissions.
+                existing.show()
+                existing.raise_()
+                existing.activateWindow()
+                return
+            # Non-modal, so its submission windows ("Return to ingest form") stay clickable.
+            self._ingest_dialog = IngestDialog(self.settings, self.assets, self,
+                                               library_root=root, category=category)
+            self._ingest_dialog.show()
         except Exception as error:
             self.show_error(str(error))
 
@@ -1176,10 +1219,42 @@ class Browser(QtWidgets.QWidget):
         if self.access.is_admin:
             QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(self.settings['_config_path']))
 
+    def shutdown(self):
+        """Best-effort cleanup when the host quits: release edit locks, stop threads, never prompt."""
+        if self.edit_session:
+            for handle in self.edit_session['locks'].values():
+                try:
+                    release_edit_lock(handle)
+                except Exception:
+                    pass
+            self.edit_session = None
+        loader = getattr(self, 'loader', None)
+        if loader is not None and loader.isRunning():
+            loader.requestInterruption()
+            loader.wait(2000)
+        for task in self.ingest_threads():
+            task.wait(5000)  # Tools time out after a minute; don't hold Nuke's exit longer than this.
+        self.cache.pool.clear()
+        self.player.stop()
+
     def show_error(self, message):
         QtWidgets.QMessageBox.warning(self, 'TinyLib', message)
 
+    def ingest_threads(self):
+        """Metadata scans and manifest builds still running in the ingest form."""
+        dialog = getattr(self, '_ingest_dialog', None)
+        if dialog is None:
+            return []
+        try:
+            return [task for task in list(dialog._scans) + list(dialog._background) if task.isRunning()]
+        except RuntimeError:  # The form was already deleted.
+            return []
+
     def closeEvent(self, event):
+        if self.ingest_threads():
+            self.status.setText('The ingest form is still reading media metadata; close again in a moment.')
+            event.ignore()
+            return
         if any(window.worker.isRunning() for window in getattr(self, '_ingest_submissions', [])):
             self.status.setText('Deadline submission is still running; you can keep using the library.')
             event.ignore()

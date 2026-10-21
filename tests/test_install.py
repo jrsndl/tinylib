@@ -89,6 +89,28 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(Path(load_settings(self.config, install=self.ini)['action_roots'][0]),
                          (APP_ROOT / 'actions').resolve())
 
+    def test_ini_tools_override_browser_config(self):
+        self.write_ini('[tinylib]\nsecurity = security.json\n\n[tools]\n'
+                       'ffmpeg = C:/tools/ffmpeg/ffmpeg.exe\n'
+                       'ffprobe = //studio/tools/ffprobe.exe\n'
+                       'oiiotool = oiiotool\n'
+                       'vfx_transcode = bin\\vfx-transcode.exe\n'
+                       'ffplay =\n')
+        atomic_json(self.config, {'libraries': [], 'tools': {'ffmpeg': 'old-ffmpeg', 'ffplay': 'config-ffplay'}})
+        tools = load_settings(self.config, install=self.ini)['tools']
+        self.assertEqual(tools['ffmpeg'], 'C:/tools/ffmpeg/ffmpeg.exe')
+        self.assertEqual(tools['ffprobe'], '//studio/tools/ffprobe.exe')
+        self.assertEqual(tools['oiiotool'], 'oiiotool')  # Bare name: found on PATH.
+        self.assertEqual(Path(tools['vfx_transcode']), (self.root / 'bin' / 'vfx-transcode.exe').resolve())
+        self.assertEqual(tools['ffplay'], 'config-ffplay')  # Empty in the ini: the config value stays.
+
+    def test_ini_tools_reach_the_farm_worker(self):
+        from tinylib.processing import apply_worker_settings
+        self.write_ini('[tinylib]\nsecurity = security.json\n\n[tools]\nffmpeg = C:/farm/ffmpeg.exe\n')
+        settings = load_settings(self.config, install=self.ini)
+        job = apply_worker_settings({'tools': {'ffmpeg': '//evil/ffmpeg.exe'}, 'media': {}}, settings)
+        self.assertEqual(job['tools']['ffmpeg'], 'C:/farm/ffmpeg.exe')
+
     def test_without_ini_production_access_is_denied(self):
         settings = load_settings(self.config, install=self.ini)
         access = AccessControl(settings, identity='studio\\boss')

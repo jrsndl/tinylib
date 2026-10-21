@@ -6,7 +6,7 @@ import re
 DEFAULT_FIELDS = {
     'category_1': '', 'category_2': '', 'category_3': '',
     'version_to_delete': False, 'version_number': 1, 'version_superseded_by_id': '',
-    'ingest_user': 'unknown', 'ingest_date': '20251224', 'ingest_note': '',
+    'ingest_user': 'unknown', 'ingest_date': '', 'ingest_note': '',
     'acquire_project': '', 'acquire_date': '', 'acquire_source': '',
     'acquire_price': 'eur 0', 'acquire_author': '', 'acquire_usage': '', 'acquire_note': '',
 }

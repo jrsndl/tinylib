@@ -31,7 +31,7 @@ class LibraryCrosscheckTests(unittest.TestCase):
         result = crosscheck_library(root, 'Elements Library', output, lambda *args: events.append(args),
                                     now=datetime(2026, 10, 2, 12, 34, 56, tzinfo=timezone.utc))
         log = Path(result['log_path'])
-        self.assertEqual(log.name, 'Elements Library_ccrosscheck_20261002_123456.log')
+        self.assertEqual(log.name, 'Elements Library_crosscheck_20261002_123456.log')
         text = log.read_text(encoding='utf-8')
         self.assertIn('[fire/Present]', text)
         self.assertIn('plate.1002.exr', text)

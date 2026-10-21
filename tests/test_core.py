@@ -4,9 +4,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 from tinylib.library import Library, atomic_json, matches, sequence_files, detect_sequence, safe_component
-from tinylib.ingest import make_manifest, submit_deadline
+from tinylib.ingest import submit_deadline
 from tinylib.processing import sample_indices, process
-from tinylib.settings import load_settings
 from tinylib.access import AccessControl
 
 

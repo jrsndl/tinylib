@@ -8,7 +8,7 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 os.environ['SDL_VIDEODRIVER'] = 'dummy'
 os.environ['SDL_RENDER_DRIVER'] = 'software'
 from tinylib.qt import QtCore
-from tinylib.player import Player, frame_filter, play_arguments, sibling_tool
+from tinylib.player import Player, frame_filter, sibling_tool
 from tinylib.settings import load_settings
 
 root = Path(__file__).resolve().parents[1]

@@ -121,6 +121,13 @@ class CrosscheckDialog(QtWidgets.QDialog):
         self.cancel_button.setEnabled(False)
         self.summary.setText('Cancelling after the current filesystem check…')
 
+    def reject(self):
+        # Esc goes through reject(), not closeEvent(): cancel first, close once the thread ends.
+        if self.worker.isRunning():
+            self.cancel_scan()
+            return
+        super().reject()
+
     def closeEvent(self, event):
         if self.worker.isRunning():
             self.cancel_scan()
@@ -211,6 +218,13 @@ class MetadataRescanDialog(QtWidgets.QDialog):
         self.worker.requestInterruption()
         self.cancel_button.setEnabled(False)
         self.summary.setText('Cancelling after the current metadata probe…')
+
+    def reject(self):
+        # Esc goes through reject(), not closeEvent(): cancel first, close once the thread ends.
+        if self.worker.isRunning():
+            self.cancel_scan()
+            return
+        super().reject()
 
     def closeEvent(self, event):
         if self.worker.isRunning():

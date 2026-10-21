@@ -1,11 +1,15 @@
 import copy
 import os
 import unittest
+from helpers import HAVE_QT, requires_qt
+
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
-from tinylib.qt import QtWidgets
-from tinylib.properties_ui import PropertiesEditor
+if HAVE_QT:
+    from tinylib.qt import QtWidgets
+    from tinylib.properties_ui import PropertiesEditor
 
 
+@requires_qt
 class MultiEditTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -22,7 +26,10 @@ class MultiEditTests(unittest.TestCase):
         self.addCleanup(self.editor.close)
 
     def test_aggregate_does_not_create_changes(self):
-        self.assertEqual(self.editor.fields['ingest_note'].toPlainText(), 'First note Second note')
+        # Differing values start empty with a placeholder, so an edit replaces them instead of joining.
+        self.assertEqual(self.editor.fields['ingest_note'].toPlainText(), '')
+        self.assertEqual(self.editor.fields['ingest_note'].placeholderText(),
+                         'Multiple values: First note | Second note')
         self.assertEqual(self.editor.fields['colorspace'].text(), 'ACEScg')
         self.assertEqual(self.editor.changes(), {})
         self.assertIn('#ffa02f', self.editor.fields['ingest_note'].styleSheet())
@@ -45,7 +52,7 @@ class MultiEditTests(unittest.TestCase):
         self.assertIn('#ffa02f', self.editor.fields['colorspace'].styleSheet())
         self.assertEqual(self.editor.changes(), {'ingest_note': 'Shared note'})
         self.assertEqual(self.assets[0]['ingest_note'], 'First note')
-        self.editor.fields['ingest_note'].setPlainText('First note Second note')
+        self.editor.fields['ingest_note'].setPlainText('')
         self.assertEqual(self.editor.changes(), {})
         self.assertIn('#ffa02f', self.editor.fields['ingest_note'].styleSheet())
 
@@ -53,6 +60,11 @@ class MultiEditTests(unittest.TestCase):
         self.editor.fields['tags'].setPlainText('shared, smoke')
         self.editor.set_assets(self.assets, True, True)
         self.assertEqual(self.editor.changes(), {'tags': ['shared', 'smoke']})
+
+    def test_single_selection_clears_multiple_value_placeholder(self):
+        self.editor.set_assets(self.assets[:1], False, True)
+        self.assertEqual(self.editor.fields['ingest_note'].placeholderText(), '')
+        self.assertEqual(self.editor.fields['ingest_note'].toPlainText(), 'First note')
 
     def test_field_permissions_are_intersection_of_selection(self):
         class Access:

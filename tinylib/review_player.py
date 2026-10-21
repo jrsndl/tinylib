@@ -6,13 +6,14 @@ small forward chunks lets the same cache serve forward/reverse playback and seek
 import math
 from collections import OrderedDict
 from fractions import Fraction
-from .qt import QtCore, QtGui, QtWidgets
+from .qt import QtCore, QtGui, QtWidgets, event_pos
 
 
 def media_info(asset, stream):
     still = asset.get('kind') != 'footage'
     fps = None
-    for value in (stream.get('avg_frame_rate'), stream.get('r_frame_rate'), asset.get('metadata', {}).get('FPS')):
+    for value in (stream.get('avg_frame_rate'), stream.get('r_frame_rate'), asset.get('metadata', {}).get('frame_rate'),
+                  asset.get('metadata', {}).get('FPS')):
         try:
             candidate = Fraction(str(value))
             if candidate > 0:
@@ -42,6 +43,10 @@ def media_info(asset, stream):
 class FrameDecoder(QtCore.QObject):
     available = QtCore.Signal(int)
     error = QtCore.Signal(str)
+    # The stream holds fewer frames than its metadata promised (count from duration × fps).
+    length_changed = QtCore.Signal(int)
+    # FFmpeg 5.1 renamed -vsync to -fps_mode; older studio builds only know -vsync.
+    legacy_vsync = False
     CHUNK = 32
     BUDGET = 128 * 1024 * 1024
 
@@ -64,6 +69,7 @@ class FrameDecoder(QtCore.QObject):
         self.end_frame = 0
         self.closed = False
         self.requested = 0
+        self.failed_prefetch = None
 
     def image(self, frame):
         image = self.cache.get(frame)
@@ -76,6 +82,9 @@ class FrameDecoder(QtCore.QObject):
             return
         if not prefetch:
             self.requested = frame
+            self.failed_prefetch = None
+        elif frame // self.CHUNK * self.CHUNK == getattr(self, 'failed_prefetch', None):
+            return  # tick() asks every frame near a boundary; don't restart a chunk that just failed.
         if self.process is not None:
             if prefetch or self.start_frame <= frame < self.end_frame:
                 return
@@ -85,6 +94,8 @@ class FrameDecoder(QtCore.QObject):
         self.start_frame, self.end_frame = start, end
         process = QtCore.QProcess(self)
         self.process = process
+        retry = (frame, prefetch)
+        uses_fps_mode = not FrameDecoder.legacy_vsync
         buffer, errors = bytearray(), bytearray()
         next_frame = [start]
         timeout = QtCore.QTimer(process)
@@ -111,15 +122,29 @@ class FrameDecoder(QtCore.QObject):
             errors.extend(bytes(process.readAllStandardError()))
             del errors[:-16000]
 
-        def done(code, _):
+        def done(code, status):
             timeout.stop()
             if process is self.process:
                 read()
                 timeout.stop()
                 read_errors()
                 self.process = None
-                if code or next_frame[0] < end:
-                    self.error.emit(errors.decode('utf-8', 'replace') or 'Could not decode the requested preview frames.')
+                message = errors.decode('utf-8', 'replace')
+                normal = status == QtCore.QProcess.NormalExit
+                if code and uses_fps_mode and 'fps_mode' in message:
+                    # This process used -fps_mode (other decoders may have switched already).
+                    FrameDecoder.legacy_vsync = True
+                    process.deleteLater()
+                    return self.request(*retry)
+                elif normal and not code and 0 < next_frame[0] < end:
+                    # Decoding stopped early: the clip is shorter than estimated. Trim, don't fail.
+                    self.count = next_frame[0]
+                    self.length_changed.emit(self.count)
+                elif code or next_frame[0] < end:
+                    if retry[1]:
+                        self.failed_prefetch = start
+                        return process.deleteLater()  # A failed prefetch is retried when the frame is needed.
+                    self.error.emit(message or 'Could not decode the requested preview frames.')
             process.deleteLater()
 
         def failed(_):
@@ -147,7 +172,8 @@ class FrameDecoder(QtCore.QObject):
         if start:
             args += ['-ss', '%.9f' % seek]
         args += ['-i', self.media, '-map', '0:v:0', '-an', '-sn',
-                '-vf', 'scale=%d:%d' % (self.width, self.height), '-fps_mode', 'passthrough',
+                '-vf', 'scale=%d:%d' % (self.width, self.height),
+                '-fps_mode' if uses_fps_mode else '-vsync', 'passthrough',
                 '-frames:v', str(end - start), '-pix_fmt', 'rgb24', '-f', 'rawvideo', 'pipe:1']
         process.start(self.executable, args)
         timeout.start()
@@ -180,7 +206,7 @@ class Timeline(QtWidgets.QSlider):
         groove = self.style().subControlRect(QtWidgets.QStyle.CC_Slider, option, QtWidgets.QStyle.SC_SliderGroove, self)
         handle = self.style().subControlRect(QtWidgets.QStyle.CC_Slider, option, QtWidgets.QStyle.SC_SliderHandle, self)
         span = max(1, groove.width() - handle.width())
-        x = event.pos().x() - groove.x() - handle.width() // 2
+        x = event_pos(event).x() - groove.x() - handle.width() // 2
         return QtWidgets.QStyle.sliderValueFromPosition(self.minimum(), self.maximum(), max(0, min(span, x)), span)
 
     def mousePressEvent(self, event):
@@ -240,6 +266,7 @@ class ReviewPlayer(QtWidgets.QWidget):
         self.decoder = FrameDecoder(settings, asset.get('proxy') or asset.get('thumb'), stream, self.fps, self.count, self)
         self.decoder.available.connect(self.frame_ready)
         self.decoder.error.connect(self.decode_error)
+        self.decoder.length_changed.connect(self.length_changed)
         self.bar = QtWidgets.QWidget(self)
         self.bar.setObjectName('timelineBar')
         self.bar.setStyleSheet('QWidget#timelineBar { background: #292929; } QLabel { color: #ddd; background: transparent; } '
@@ -318,7 +345,15 @@ class ReviewPlayer(QtWidgets.QWidget):
         self.stop_playback()
         self.seek(self.target + amount)
 
+    def length_changed(self, count):
+        self.count = max(1, count)
+        self.timeline.setRange(0, self.count - 1)
+        if self.target >= self.count:
+            self.seek(self.count - 1)
+        self.update_indicator()
+
     def seek(self, frame):
+        self.failure = ''  # Any explicit seek retries after an earlier decode error.
         self.target = max(0, min(self.count - 1, int(frame)))
         image = self.decoder.image(self.target)
         self.pending = image is None
@@ -457,7 +492,7 @@ class ReviewPlayer(QtWidgets.QWidget):
         self.update()
 
     def mouseMoveEvent(self, event):
-        self.bar.setVisible(event.pos().y() >= self.height() - 90 or self.scrubbing)
+        self.bar.setVisible(event_pos(event).y() >= self.height() - 90 or self.scrubbing)
         self.update()
 
     def leaveEvent(self, event):

@@ -1,18 +1,24 @@
 """Farm worker. All outputs are staged and verified before library publication."""
 import json
-import os
 import shutil
 import subprocess
 from fractions import Fraction
 from pathlib import Path
 from .library import Library, atomic_json, read_json, safe_component, sequence_files, split_sequence
 from .asset_types import extension_groups, validate_metadata
+from .media_probe import CONVERSION_TIMEOUT, PROBE_TIMEOUT, number, pixel_aspect
+from .log import get_logger
+
+log = get_logger(__name__)
 
 
-def run(command):
+def run(command, timeout=CONVERSION_TIMEOUT):
     command = [str(v) for v in command]
     print(subprocess.list2cmdline(command), flush=True)
-    result = subprocess.run(command, capture_output=True, text=True, errors='replace')
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, errors='replace', timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError('Conversion did not finish within %g s: %s' % (timeout, command[0])) from error
     if result.returncode:
         raise RuntimeError('Conversion failed:\n' + result.stderr[-8000:] + result.stdout[-2000:])
     # Old OIIO versions can report failed color conversion as a warning with exit 0.
@@ -32,7 +38,7 @@ def probe(path, tools, count=False):
     if count:
         args += ['-count_frames']
     args += ['-show_streams', '-of', 'json', str(path)]
-    streams = json.loads(run(args)).get('streams', [])
+    streams = json.loads(run(args, timeout=PROBE_TIMEOUT)).get('streams', [])
     if not streams:
         raise ValueError('No readable image/video stream: ' + str(path))
     return streams[0]
@@ -100,9 +106,9 @@ class Processor:
                     raise ValueError('OCIO config is unavailable: ' + ocio)
                 rate = Fraction(str(job['fps'])).limit_denominator(1001)
                 rate = str(rate.numerator) if rate.denominator == 1 else '%s/%s' % (rate.numerator, rate.denominator)
-                run([self.tools['vfx_transcode'], '-i', sources[0], '-r', rate,
-                     '-ci', job['colorspace'], '-co', self.profile['output_colorspace'],
-                     '-ocio', ocio, '-oiio', self.tools['oiiotool'], '-ffmpeg', self.ffmpeg,
+                run([self.tools.get('vfx_transcode', 'vfx-transcode'), '-i', sources[0], '-r', rate,
+                     '-ci', job['colorspace'], '-co', self.profile.get('output_colorspace', 'Output - Rec.709'),
+                     '-ocio', ocio, '-oiio', self.tools.get('oiiotool', 'oiiotool'), '-ffmpeg', self.ffmpeg,
                      '-width', '1920', '-mezzanine', 'jpg', '-temp', '_vfx_temp',
                      '-ff_filter', fit_filter(1920, 1080),
                      '-ff_encode', '-c:v libx264 -crf 23 -pix_fmt yuv420p -movflags +faststart -color_primaries bt709 -color_trc bt709 -colorspace bt709',
@@ -168,7 +174,8 @@ def validate_media(outputs, manifest):
             actual = int(info.get('nb_read_frames', 0))
             if first is not None and actual != last - first + 1:
                 raise ValueError('Proxy frame count differs from main: %s vs %s' % (actual, last-first+1))
-            if abs(float(Fraction(info['avg_frame_rate'])) - manifest['fps']) > .01:
+            rate = number(info.get('avg_frame_rate'))
+            if rate and abs(rate - manifest['fps']) > .01:
                 print('Warning: proxy frame rate differs from ingest FPS; ingest will continue.')
 
 
@@ -186,6 +193,28 @@ def apply_worker_settings(job, settings):
     elif any(media.get('mode') == 'generate' for media in job.get('media', {}).values()):
         raise ValueError('Processing profile %r is not configured on this worker.' % name)
     return job
+
+
+def footage_timing(job, main_info, first, last):
+    """(frame_rate, frames, seconds) for footage.
+
+    An image sequence is probed one frame at a time, so ffprobe's rate and
+    duration describe a single image (image2 defaults to 25 fps, 0.04 s). The
+    sequence uses the ingest FPS and its frame range. Only a container's own
+    stream values are trusted.
+    """
+    fps = float(job['fps'])
+    if first is not None:
+        frames = last - first + 1
+        return fps, frames, frames / fps
+    frame_rate = number(main_info.get('avg_frame_rate')) or number(main_info.get('r_frame_rate')) or fps
+    frames = int(number(main_info.get('nb_frames')) or 0)
+    seconds = number(main_info.get('duration'))
+    if not frames and seconds:
+        frames = int(round(seconds * frame_rate))
+    if seconds is None:
+        seconds = frames / frame_rate if frames else 0.0
+    return frame_rate, frames, seconds
 
 
 def process(manifest_path, access=None, settings=None):
@@ -270,19 +299,12 @@ def process(manifest_path, access=None, settings=None):
         if job['kind'] in ('still', 'footage'):
             main_info = probe(main_dir / sources[0].name, job['tools'])
             metadata.update(width=int(main_info['width']), height=int(main_info['height']),
-                            pixel_aspect=float(main_info.get('sample_aspect_ratio', '1:1').split(':')[0]) /
-                                         max(1.0, float(main_info.get('sample_aspect_ratio', '1:1').split(':')[-1])),
+                            pixel_aspect=pixel_aspect(main_info.get('sample_aspect_ratio', '1:1')),
                             colorspace=job['colorspace'])
             groups = extension_groups({'extension_groups': job.get('extension_groups', {})})
             metadata['is_raw'] = sources[0].suffix.lower().lstrip('.') in groups.get('extensions_stills_raw', [])
             if job['kind'] == 'footage':
-                frame_rate = job['fps']
-                try:
-                    frame_rate = float(Fraction(main_info.get('avg_frame_rate', job['fps'])))
-                except (ValueError, ZeroDivisionError):
-                    pass
-                frames = (last - first + 1) if first is not None else int(main_info.get('nb_frames') or 0)
-                seconds = float(main_info.get('duration') or (frames / frame_rate if frames else 0))
+                frame_rate, frames, seconds = footage_timing(job, main_info, first, last)
                 metadata.update(frame_rate=frame_rate, duration_frames=frames,
                                 duration_seconds=seconds, frame_start=first or 0,
                                 frame_end=last if last is not None else max(0, frames - 1))
@@ -301,7 +323,7 @@ def process(manifest_path, access=None, settings=None):
         from .asset_fields import apply_defaults
         apply_defaults(record)
         record['ingest_user'] = job.get('ingest_user', 'unknown')
-        record['ingest_date'] = job.get('ingest_date', '20251224')
+        record['ingest_date'] = job.get('ingest_date', '')
         for key, path in outputs.items():
             record[key] = str(destination / key) if path == stage / key else str(destination / key / path.name)
         if highres_pattern:
@@ -315,7 +337,9 @@ def process(manifest_path, access=None, settings=None):
         shutil.rmtree(work)
         library.publish(record, stage)
         atomic_json(status_path, {'state': 'complete', 'asset': record['id']})
+        log.info('Published %s into %s', record['id'], root)
         return record
     except Exception as error:
+        log.error('Ingest %s failed; staging kept at %s: %s', identifier, stage, error)
         atomic_json(status_path, {'state': 'failed', 'error': str(error), 'staging': str(stage)})
         raise

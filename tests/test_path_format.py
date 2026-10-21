@@ -11,7 +11,7 @@ class PathFormatTests(unittest.TestCase):
             'nuke': ['C:/some/folder/files.####.exr 1001-1002'],
             'ayon': ['C:/some/folder/files.1001.exr', 'C:/some/folder/files.1002.exr'],
             'hashtag': ['C:/some/folder/files.####.exr'],
-            'houdini': ['C:/some/folder/files.$F.exr'],
+            'houdini': ['C:/some/folder/files.$F4.exr'],
             'flame': ['C:/some/folder/files.[1001-1002].exr'],
             'printf': ['C:/some/folder/files.%04d.exr'],
             'folder': ['C:/some/folder'],
@@ -23,6 +23,9 @@ class PathFormatTests(unittest.TestCase):
         asset = {'main': '/show/test.%06d.exr 5-6', 'kind': 'footage'}
         self.assertEqual(format_asset(asset, 'hashtag'), ['/show/test.######.exr'])
         self.assertEqual(format_asset(asset, 'flame'), ['/show/test.[5-6].exr'])
+        self.assertEqual(format_asset(asset, 'houdini'), ['/show/test.$F6.exr'])
+        unpadded = {'main': '/show/test.#.exr', 'first': 1, 'last': 9, 'kind': 'footage'}
+        self.assertEqual(format_asset(unpadded, 'houdini'), ['/show/test.$F.exr'])
 
     def test_stills_unknown_format_and_asset_joining(self):
         still = {'main': r'D:\images\one.exr', 'kind': 'still'}

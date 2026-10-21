@@ -22,12 +22,6 @@
     "extensions_materials": ["mtlx", "sbs", "sbsar", "mra"],
     "extensions_workfiles": ["nk", "aep", "ai", "indd", "kra", "pur", "sni"]
   },
-  "tools": {
-    "ffmpeg": "ffmpeg",
-    "ffprobe": "ffprobe",
-    "oiiotool": "oiiotool",
-    "vfx_transcode": "vfx-transcode"
-  },
   "profiles": {
     "ACES to Rec.709": {
       "description": "Studio ACES 1.2 conversion; largest source frame as thumbnail.",

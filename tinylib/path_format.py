@@ -7,7 +7,7 @@ FORMATS = [
     ('nuke', 'Nuke — #### plus range'),
     ('ayon', 'AYON — every frame path'),
     ('hashtag', 'Hashtag — ####'),
-    ('houdini', 'Houdini — $F'),
+    ('houdini', 'Houdini — $F4'),
     ('flame', 'Flame — [first-last]'),
     ('printf', 'Printf — %04d'),
     ('folder', 'Fallback — parent folder'),
@@ -52,7 +52,8 @@ def format_asset(asset, notation='nuke'):
     if notation == 'hashtag':
         return [hash_pattern]
     if notation == 'houdini':
-        return [hash_pattern.replace('#' * width, '$F', 1)]
+        # Houdini pads with $F<width>: $F4 reads files.0001.exr, plain $F reads files.1.exr.
+        return [hash_pattern.replace('#' * width, '$F%d' % width if width > 1 else '$F', 1)]
     if notation == 'flame':
         return [hash_pattern.replace('#' * width, '[%s-%s]' % (first, last), 1)]
     if notation == 'printf':

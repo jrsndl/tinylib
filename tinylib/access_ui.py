@@ -109,7 +109,10 @@ class AccessDialog(QtWidgets.QDialog):
         try:
             users = {}
             for row in range(self.users.rowCount()):
-                name = self.users.item(row, 0).text().strip().casefold()
+                item = self.users.item(row, 0)
+                name = item.text().strip().casefold() if item else ''
+                if not name:
+                    raise ValueError('Row %d has no account name. Enter DOMAIN\\login or remove the row.' % (row + 1))
                 if name in users:
                     raise ValueError('Duplicate Windows account: ' + name)
                 users[name] = [group for column, group in enumerate(self.groups, 1)
@@ -126,6 +129,13 @@ class AccessDialog(QtWidgets.QDialog):
                     policy[capability] = grants
                 else:
                     policy.pop(capability, None)
+            me = self.access.identity.casefold()
+            if 'admins' not in users.get(me, []):
+                answer = QtWidgets.QMessageBox.question(
+                    self, 'TinyLib', 'You are removing your own admin rights (%s). You will not be able to '
+                    'change access rights afterwards. Continue?' % me)
+                if answer != QtWidgets.QMessageBox.Yes:
+                    return
             self.access.save(users, self.groups, self.libraries, defaults)
             self.accept()
         except Exception as error:

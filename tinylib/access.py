@@ -8,6 +8,9 @@ import copy
 import os
 from pathlib import Path
 from .library import atomic_json, library_lock, read_json
+from .log import get_logger
+
+log = get_logger(__name__)
 
 DEFAULT_GROUPS = ['admins', 'managers', 'users', 'restricted']
 
@@ -26,7 +29,7 @@ def windows_identity():
             return buffer.value.casefold()
         raise RuntimeError('Windows could not identify the current account.')
     import pwd
-    return pwd.getpwuid(os.getuid()).pw_name
+    return pwd.getpwuid(os.getuid()).pw_name.casefold()
 
 
 def root_key(root):
@@ -84,6 +87,9 @@ class AccessControl:
         self.refresh()
 
     def _deny(self, message):
+        if message != getattr(self, '_logged_error', None):
+            log.warning('Access denied for %s: %s', self.identity, message)
+            self._logged_error = message
         self.error = message
         self.groups = set()
         self.data = {'access': {'groups': list(DEFAULT_GROUPS), 'users': {}, 'defaults': {}}, 'libraries': []}

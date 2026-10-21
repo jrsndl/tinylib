@@ -5,7 +5,7 @@ import math
 import os
 import threading
 import time
-from .qt import QtCore, QtGui, QtWidgets
+from .qt import QtCore, QtGui, QtWidgets, event_pos
 from .library import Library
 from .preferences import asset_key
 from .filters import duration
@@ -103,12 +103,22 @@ class ImageRead(QtCore.QRunnable):
         self.path, self.signals, self.disk_root = path, signals, disk_root
 
     def run(self):
+        try:
+            self._read()
+        except Exception:  # Any failure must still answer, or the preview stays pending forever.
+            self.signals.ready.emit(self.path, QtGui.QImage(), False)
+
+    def _read(self):
         cached = None
         try:
             cached = cached_image_path(self.disk_root, self.path)
             if cached.is_file():
                 image = QtGui.QImage(str(cached))
                 if not image.isNull():
+                    try:
+                        os.utime(cached)  # Keeps previews in daily use out of the 60-day prune.
+                    except OSError:
+                        pass
                     self.signals.ready.emit(self.path, image, True)
                     return
                 cached.unlink()
@@ -138,6 +148,11 @@ class ImageRead(QtCore.QRunnable):
 class ImageCache(QtCore.QObject):
     changed = QtCore.Signal()
     activity = QtCore.Signal(object)
+    MAX_IMAGES = 400
+    MAX_BYTES = 256 * 1024 * 1024
+    # A path evicted this recently is served from its small poster instead of being re-read.
+    # Otherwise more visible previews than the cache holds would evict, repaint and re-read forever.
+    EVICTION_COOLDOWN = 5.0
 
     def __init__(self, parent=None, disk_root=None):
         super().__init__(parent)
@@ -153,6 +168,12 @@ class ImageCache(QtCore.QObject):
         self.completed = 0
         self.started_at = None
         self.pending = set()
+        self.evicted = OrderedDict()
+        # Repaint once cooled-down paths may be read again, so poster-only tiles sharpen.
+        self.cooldown = QtCore.QTimer(self)
+        self.cooldown.setSingleShot(True)
+        self.cooldown.setInterval(int(self.EVICTION_COOLDOWN * 1000) + 50)
+        self.cooldown.timeout.connect(self.changed.emit)
         self.pool = QtCore.QThreadPool(self)
         self.pool.setMaxThreadCount(4)
         self.signals = ImageResult(self)
@@ -164,6 +185,13 @@ class ImageCache(QtCore.QObject):
         if path in self.images:
             self.images.move_to_end(path)
             return self.images[path]
+        evicted_at = self.evicted.get(path)
+        if evicted_at is not None:
+            if time.monotonic() - evicted_at < self.EVICTION_COOLDOWN:
+                if not self.cooldown.isActive():
+                    self.cooldown.start()
+                return self.fallback(path)
+            del self.evicted[path]
         if path not in self.pending:
             if self.started_at is None:
                 self.started_at = time.perf_counter()
@@ -209,9 +237,12 @@ class ImageCache(QtCore.QObject):
             self.bytes -= previous.width() * previous.height() * 4
         self.images[path] = QtGui.QPixmap.fromImage(image)
         self.bytes += image.width() * image.height() * 4
-        while len(self.images) > 160 or self.bytes > 96 * 1024 * 1024:
-            _, removed = self.images.popitem(last=False)
+        while len(self.images) > self.MAX_IMAGES or self.bytes > self.MAX_BYTES:
+            evicted_path, removed = self.images.popitem(last=False)
             self.bytes -= removed.width() * removed.height() * 4
+            self.evicted[evicted_path] = time.monotonic()
+        while len(self.evicted) > 4096:
+            self.evicted.popitem(last=False)
         self.activity.emit(self.snapshot())
         self.changed.emit()
 
@@ -390,7 +421,7 @@ class DetailsView(QtWidgets.QTableView):
         self.setItemDelegateForColumn(1, TinyPreview(cards, self))
 
     def mouseMoveEvent(self, event):
-        self.cards.hover_row = self.indexAt(event.pos()).row()
+        self.cards.hover_row = self.indexAt(event_pos(event)).row()
         super().mouseMoveEvent(event)
 
     def leaveEvent(self, event):
@@ -454,7 +485,9 @@ class Grid(QtWidgets.QListView):
             self.setLayoutMode(QtWidgets.QListView.SinglePass)
             self.setResizeMode(QtWidgets.QListView.Fixed)
             self.setTextElideMode(QtCore.Qt.ElideNone)
-            self.setItemDelegate(QtWidgets.QStyledItemDelegate(self))
+            if getattr(self, '_list_delegate', None) is None:
+                self._list_delegate = QtWidgets.QStyledItemDelegate(self)
+            self.setItemDelegate(self._list_delegate)
             self.list_revision = -1
             self.update_list_geometry()
         else:
@@ -482,7 +515,7 @@ class Grid(QtWidgets.QListView):
         if self.list_mode:
             super().mouseMoveEvent(event)
             return
-        index = self.indexAt(event.pos())
+        index = self.indexAt(event_pos(event))
         row = index.row() if index.isValid() else -1
         if self.cards.hover_row != row:
             self.cards.hover_row, self.cards.frame = row, 0

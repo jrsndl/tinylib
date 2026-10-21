@@ -10,8 +10,11 @@ import tempfile
 import subprocess
 import uuid
 from pathlib import Path
-from .library import atomic_json, detect_sequence, safe_component, sequence_files, split_sequence
+from .library import atomic_json, detect_sequence, safe_component, split_sequence
 from .access import AccessControl
+from .log import get_logger
+
+log = get_logger(__name__)
 from .asset_types import (SCHEMA_VERSION, ASSET_TYPES, canonical_type, default_metadata,
                           extension_groups, representation, validate_metadata,
                           validate_representation, relative_paths)
@@ -314,4 +317,5 @@ def submit_deadline(manifest, settings, progress=None):
     report('Saving Deadline confirmation...')
     atomic_json(path.with_suffix('.submission.json'), {'deadline_job_id': identifier, 'manifest': str(path),
                                                       'confirmation_seconds': seconds, 'output': output})
+    log.info('Submitted %s to Deadline as job %s (manifest %s)', manifest['name'], identifier, path)
     return identifier, path

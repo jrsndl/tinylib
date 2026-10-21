@@ -126,8 +126,10 @@ class PropertiesEditor(QtWidgets.QWidget):
                 field.setValue(value if type(value) is int else 1)
             elif isinstance(field, QtWidgets.QPlainTextEdit):
                 field.setPlainText(str(value))
+                field.setPlaceholderText('')
             else:
                 field.setText('' if value is None else str(value))
+                field.setPlaceholderText('')
             if key in DEFAULT_FIELDS:
                 allowed = self.field_allowed(key)
                 field.setVisible(allowed)
@@ -169,13 +171,20 @@ class PropertiesEditor(QtWidgets.QWidget):
                 value = ', '.join(value) if key == 'tags' else str(value)
                 if value not in values:
                     values.append(value)
+            placeholder = ''
             if key == 'tags':
                 keywords = dict.fromkeys(keyword.strip() for value in values
                                          for keyword in value.split(',') if keyword.strip())
                 text = ', '.join(keywords)
+            elif len(values) > 1 and key not in ('name', 'library', 'category', 'kind', 'range'):
+                # Editable field with differing values: start empty so typing replaces them all,
+                # instead of writing the joined text ("ACEScg sRGB") into every asset.
+                text = ''
+                placeholder = 'Multiple values: ' + ' | '.join(value or '(empty)' for value in values)
             else:
                 text = ' '.join(values)
             field.setPlainText(text) if isinstance(field, QtWidgets.QPlainTextEdit) else field.setText(text)
+            field.setPlaceholderText(placeholder)
         self.metadata.setRowCount(0)
         metadata_keys = dict.fromkeys(key for asset in self.assets for key in asset.get('metadata', {}))
         for key in metadata_keys:

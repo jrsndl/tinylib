@@ -9,6 +9,7 @@ from tinylib.access import AccessControl
 from tinylib.library import atomic_json, read_json
 from tinylib.library_tools import create_new_library
 from tinylib.settings import load_settings
+from helpers import requires_qt
 
 
 class CreateLibraryTests(unittest.TestCase):
@@ -132,6 +133,7 @@ class CreateLibraryTests(unittest.TestCase):
         self.assertFalse((self.root / 'tinylib_data.json').exists())
         self.assertFalse(list(self.folder.rglob('.tinylib-write.lock')))
 
+    @requires_qt
     def test_dialog_creates_from_selected_template(self):
         os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
         from tinylib.qt import QtWidgets

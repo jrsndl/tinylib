@@ -1,6 +1,6 @@
 # Asset types and metadata
 
-TinyLib's versioned asset schema is defined in `tinylib/asset_types.py`. Extension groups are copied into the loaded studio settings and may be overridden in `config/studio.local.json`. Values omit the leading dot and comparisons are case-insensitive. Each asset has a required `main` representation and a required JPEG `thumb` representation. Optional representations may be omitted.
+TinyLib's versioned asset schema is defined in `tinylib/asset_types.py`. Extension groups are copied into the loaded studio settings and may be overridden with `extension_groups` in the browser configuration (see [configuration](configuration.md#extension_groups)); a group given there replaces that group's built-in list. Values omit the leading dot and comparisons are case-insensitive. Each asset has a required `main` representation and a required JPEG `thumb` representation. Optional representations may be omitted.
 
 | Type | Main | Optional representations | Metadata |
 | --- | --- | --- | --- |
@@ -29,7 +29,7 @@ These top-level fields apply to every asset type. Existing `category` remains th
 | version_number | integer | 1 |
 | version_superseded_by_id | string, replacement asset ID | empty |
 | ingest_user | string | unknown |
-| ingest_date | string, YYYYMMDD | 20251224 |
+| ingest_date | string, YYYYMMDD | empty (unknown) |
 | ingest_note | multiline string | empty |
 | acquire_project, acquire_date, acquire_source, acquire_author | string | empty |
 | acquire_price | currency code, space, amount | eur 0 |

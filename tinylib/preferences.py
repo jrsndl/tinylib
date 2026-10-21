@@ -2,6 +2,7 @@
 import copy
 import json
 import os
+import time
 import uuid
 from pathlib import Path
 from .library import atomic_json, library_lock, read_json
@@ -26,7 +27,25 @@ class Preferences:
     def __init__(self, path=None):
         base = Path(os.environ.get('APPDATA') or Path.home() / '.config')
         self.path = Path(path or os.environ.get('TINYLIB_USER_PREFS') or base / 'TinyLib' / 'preferences.json')
-        self.reload()
+        self.warning = None
+        try:
+            self.reload()
+        except OSError as error:
+            # Temporarily unreadable (another session replacing it, a network hiccup): never
+            # rename a good file. Start empty in memory; change() rereads before every save.
+            self.warning = 'Your TinyLib preferences could not be read right now (%s). Ratings and collections ' \
+                           'will appear after a restart.' % error
+            self.data = {'version': 1, 'ratings': {}, 'collections': []}
+        except ValueError as error:
+            # A damaged file must not stop TinyLib from starting; keep it for inspection.
+            aside = self.path.with_name('%s.damaged-%s%s' % (self.path.stem, time.strftime('%Y%m%d-%H%M%S'),
+                                                             self.path.suffix))
+            try:
+                os.replace(self.path, aside)
+                self.warning = 'Your TinyLib preferences were damaged and were reset. The old file is %s' % aside
+            except OSError:
+                self.warning = 'Your TinyLib preferences could not be read (%s); changes will not be saved.' % error
+            self.data = {'version': 1, 'ratings': {}, 'collections': []}
 
     def reload(self):
         data = read_json(self.path) if self.path.exists() else {'version': 1, 'ratings': {}, 'collections': []}
@@ -52,7 +71,13 @@ class Preferences:
         return self.data['collections']
 
     def collection(self, identifier):
-        return next(c for c in self.collections if c['id'] == identifier)
+        for item in self.collections:
+            if item['id'] == identifier:
+                return item
+        raise ValueError('This collection no longer exists; it may have been deleted in another TinyLib window.')
+
+    def find_collection(self, identifier):
+        return next((c for c in self.collections if c['id'] == identifier), None)
 
     def picked_keys(self):
         return {key for c in self.collections for key in c['assets']}

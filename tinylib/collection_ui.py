@@ -154,7 +154,8 @@ class CollectionsPanel(QtWidgets.QWidget):
 
     def entries(self):
         identifier = self.combo.currentData()
-        return self.preferences.collection(identifier)['assets'] if identifier else {}
+        collection = self.preferences.find_collection(identifier) if identifier else None
+        return collection['assets'] if collection else {}
 
     def populate(self, *_):
         self.model.collection_origin = {'collection': self.combo.currentData(), 'preferences': str(self.preferences.path.resolve())}

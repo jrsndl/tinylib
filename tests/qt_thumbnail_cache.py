@@ -8,7 +8,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
-from tinylib.qt import QtCore, QtGui, QtWidgets
+from tinylib.qt import QtGui, QtWidgets
 from tinylib.thumbnail_cache import cached_image_path
 from tinylib.views import Cards, ImageCache
 
@@ -41,6 +41,7 @@ with tempfile.TemporaryDirectory() as temporary:
 # Evicted strips must still have a lightweight image while being reloaded.
 with tempfile.TemporaryDirectory() as temporary:
     cache = ImageCache(disk_root=temporary)
+    cache.MAX_BYTES = 96 * 1024 * 1024  # Small budget so 50 strips must evict.
     strip = QtGui.QImage(5760, 135, QtGui.QImage.Format_RGB32)
     strip.fill(QtGui.QColor('#ca782d'))
     assets = [{'kind': 'footage', 'filmstrip': 'strip-%d.jpg' % i, 'thumb': ''} for i in range(50)]
@@ -52,6 +53,11 @@ with tempfile.TemporaryDirectory() as temporary:
     view = QtWidgets.QListView()
     cards = Cards(view, cache)
     cards.play_all = True
+    # Recently evicted paths show their poster without re-reading for a few seconds...
+    with patch.object(cache.pool, 'start'):
+        assert not cards.pixmap(assets[0], 0).isNull()
+    assert cache.requested == 0, 'Evicted images must not be re-read during the cooldown'
+    cache.EVICTION_COOLDOWN = 0  # ...and are read again once it has passed.
     with patch.object(cache.pool, 'start'):
         for width in (180, 360, 248):
             cards.width = width

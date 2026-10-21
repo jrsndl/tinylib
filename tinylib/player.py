@@ -18,7 +18,8 @@ def sibling_tool(settings, name):
 def frame_filter(asset, stream):
     # Use timestamps, not drawtext's decoded-frame counter: seeking must not reset it.
     fps = None
-    for value in (stream.get('avg_frame_rate'), stream.get('r_frame_rate'), asset.get('metadata', {}).get('FPS')):
+    for value in (stream.get('avg_frame_rate'), stream.get('r_frame_rate'), asset.get('metadata', {}).get('frame_rate'),
+                  asset.get('metadata', {}).get('FPS')):
         try:
             candidate = Fraction(str(value))
             if candidate > 0:
@@ -77,15 +78,18 @@ class Player(QtCore.QObject):
                 self.jobs.discard(probe)
                 probe.deleteLater()
 
-        def ready(code, _status):
+        def ready(code, status):
             timer.stop()
             self.jobs.discard(probe)
             if probe.property('cancelled'):
                 probe.deleteLater()
                 return
             try:
+                if status != QtCore.QProcess.NormalExit:
+                    # The 15 s timer kills ffprobe; a killed process can still report exit code 0.
+                    raise RuntimeError('Preview inspection timed out or ffprobe crashed.')
                 if code:
-                    raise RuntimeError(bytes(probe.readAllStandardError()).decode('utf-8', 'replace') or 'Preview inspection timed out or failed.')
+                    raise RuntimeError(bytes(probe.readAllStandardError()).decode('utf-8', 'replace') or 'Preview inspection failed.')
                 data = json.loads(bytes(probe.readAllStandardOutput()))
                 streams = data['streams']
                 if not streams:

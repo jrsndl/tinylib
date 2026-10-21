@@ -18,12 +18,12 @@ security = //studio/pipeline/tinylib/security.json
 config   = //studio/pipeline/tinylib/studio.json
 ```
 
-Copy `tinylib.ini.example` to start. Relative paths resolve beside the ini. Environment variables are **not** expanded.
+Copy `tinylib.ini.example` to start. Relative paths resolve beside the ini. Environment variables are **not** expanded. Every key of the three files is listed in the [configuration reference](configuration.md).
 
 ## Rules
 
 1. **Only `tinylib.ini` chooses the security file.** `TINYLIB_CONFIG`, `launch.py --config`, `*.local.json` overrides and the old `security_config` key can choose the *browser* configuration (tools, colour spaces, profiles, Deadline). They never choose the security file. TinyLib ignores `security_config` if it is still present.
-2. **The security file lists the libraries.** A library that isn't registered in `security.json` gets no grants, except for admins. `read_only: true` in the security file wins over any browser configuration.
+2. **The security file lists the libraries.** A library that isn't registered in `security.json` gets no grants, except for admins. `read_only: true` in the security file wins over any browser configuration. A library must also be listed in the browser configuration to appear in the browser; the two entries are matched by root folder.
 3. **TinyLib fails closed.** If `tinylib.ini` is missing or incomplete, or `security.json` is missing, unreadable, invalid or has no users, nobody gets access. The status line shows the reason. TinyLib never creates an administrator by itself.
 4. **Windows decides who can change rights.** Saving in **Access rights…** requires membership of `admins` *and* Windows write permission on `security.json`. If Windows refuses the write, the dialog says so. Keep the `admins` group in step with whoever can write the file.
 5. **Install the app on the share.** Artists must not be able to edit their own `tinylib.ini`. A local copy of the app folder defeats rule 1.
@@ -31,7 +31,7 @@ Copy `tinylib.ini.example` to start. Relative paths resolve beside the ini. Envi
 ## First-time setup
 
 1. Copy the app folder to the shared install location. Give artists read-only access and admins write access.
-2. Create `security.json` on the pipeline share. Give artists read access and admins write access to it and its folder. TinyLib takes a short write lock (`.tinylib-write.lock`) in that folder while saving.
+2. Create `security.json` on the pipeline share. Give artists read access and admins write access to it and its folder. TinyLib takes a short write lock (`.tinylib-write.lock`) in that folder while saving; a lock left by a crashed writer is removed automatically (see [write locks](admin.md#write-locks)).
 3. Copy `tinylib.ini.example` to `tinylib.ini` and set `security` (and optionally `config`).
 4. As an admin, from the app folder:
 
@@ -41,7 +41,7 @@ Copy `tinylib.ini.example` to start. Relative paths resolve beside the ini. Envi
    python -m tinylib.admin show
    ```
 
-5. Start TinyLib as that admin. Add libraries with **Library tools → Create New Library…**, or add them to `libraries` in `security.json`. Then add artists in **Access rights…** or with `add-user <account> users`.
+5. Start TinyLib as that admin. Add libraries with **Library tools → Create New Library…**, which registers them in both the browser configuration and `security.json`. To add them by hand, add the same root to `libraries` in both files. Then add artists in **Access rights…** or with `add-user <account> users`.
 
 `add-user` accepts groups after the account (`add-user "studio\joe" users restricted`). Without groups it adds the account to `admins`. `remove-user` refuses to remove the last admin.
 
@@ -67,7 +67,7 @@ The Deadline worker reads the same `tinylib.ini`, so it uses the same security f
 }
 ```
 
-The worker takes tool paths (ffmpeg, ffprobe, oiiotool, vfx-transcode) and the processing profile from **its own** configuration. It never uses the values in the job manifest, because anyone who can write to the Deadline spool folder can edit a manifest. Keep the spool writable only by artists who may ingest and by the farm.
+The worker takes tool paths (ffmpeg, ffprobe, oiiotool, vfx-transcode) from the `[tools]` section of **its own** `tinylib.ini`, and the processing profile from its own configuration. It never uses the values in the job manifest, because anyone who can write to the Deadline spool folder can edit a manifest. Keep the spool writable only by artists who may ingest and by the farm.
 
 The worker checks *its own* account's grants. It cannot verify which artist submitted a job, so `ingest_user` in a manifest is informational.
 

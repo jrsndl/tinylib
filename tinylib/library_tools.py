@@ -135,7 +135,7 @@ def crosscheck_library(root, name, output_dir=None, progress=None, cancelled=Non
     timestamp = now or datetime.now().astimezone()
     output_dir = Path(output_dir) if output_dir else download_folder()
     output_dir.mkdir(parents=True, exist_ok=True)
-    log_path = output_dir / ('%s_ccrosscheck_%s.log' %
+    log_path = output_dir / ('%s_crosscheck_%s.log' %
                              (_safe_filename(name), timestamp.strftime('%Y%m%d_%H%M%S')))
     lines = [
         'TinyLib library crosscheck',

@@ -12,6 +12,16 @@ security = //studio/pipeline/tinylib/security.json
 # nothing can choose another security file.
 config = //studio/pipeline/tinylib/studio.json
 
+[tools]
+# Executables TinyLib runs, for the browser and the farm worker. These override any
+# "tools" in a browser configuration. A bare name is looked up on PATH; a relative
+# path resolves beside this file. Leave a line out to use the bare name.
+ffmpeg = ffmpeg
+ffprobe = ffprobe
+ffplay = ffplay
+oiiotool = oiiotool
+vfx_transcode = vfx-transcode
+
 # Local development: use the repository's own configuration as the security file,
 # then run:  python -m tinylib.admin add-user <your account>
 # security = config/studio.json

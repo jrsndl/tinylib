@@ -30,14 +30,15 @@ class MetadataScanTests(unittest.TestCase):
         self.assertEqual(scanned['duration_frames'], 2)
         self.assertEqual(scanned['duration_seconds'], 2 / 24)
         self.assertEqual(scanned['file_size_main'], 7)
-        self.assertEqual(scanned['FPS'], 24)
+        self.assertEqual(scanned['frame_rate'], 24)
         full = {'tool': {'format': 'oiiotool_xml', 'xml': xml}, 'normalized': scanned}
         with patch('tinylib.metadata_scan.scan_asset_metadata', return_value=(scanned, full)):
             result = scan_assets([asset], settings)
         self.assertIn('width', result['results'][0]['differences'])
-        self.assertEqual(set(result['results'][0]['scanned']), {'FPS', 'width', 'height'})
-        sidecar = main / 'plate_meta.json'
+        self.assertEqual(set(result['results'][0]['scanned']), {'frame_rate', 'width', 'height'})
+        sidecar = main.parent / 'plate_meta.json'
         self.assertTrue(sidecar.is_file())
+        self.assertEqual(sorted(p.suffix for p in main.iterdir()), ['.exr', '.exr'])
         self.assertIn('oiiotool_xml', sidecar.read_text(encoding='utf-8'))
         self.assertEqual(result['sidecars'], [str(sidecar)])
         self.assertIn('METADATA DISCREPANCIES (1 assets)', format_scan_summary(result))
@@ -50,7 +51,7 @@ class MetadataScanTests(unittest.TestCase):
         with patch('tinylib.metadata_scan._run', return_value=payload):
             scanned = probe_container('clip.mov', 'ffprobe')
         self.assertEqual(scanned['duration_frames'], 120)
-        self.assertAlmostEqual(scanned['FPS'], 24000 / 1001)
+        self.assertAlmostEqual(scanned['frame_rate'], 24000 / 1001)
         self.assertEqual(scanned['timecode'], '01:00:00:00')
         self.assertEqual(scanned['reelid'], 'A001')
 

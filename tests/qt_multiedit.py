@@ -57,7 +57,8 @@ assert window.properties.isVisible() and window.edit_button.isEnabled()
 window.begin_edit()
 editor = window.properties
 assert editor.editing and len(editor.assets) == 2
-assert editor.fields['ingest_note'].toPlainText() == 'One note Two note'
+assert editor.fields['ingest_note'].toPlainText() == ''
+assert editor.fields['ingest_note'].placeholderText() == 'Multiple values: One note | Two note'
 assert editor.changes() == {}
 lock_before = next(roots[0].glob('lock.*.txt')).read_bytes()
 editor.fields['ingest_note'].setPlainText('Shared note')
@@ -98,4 +99,4 @@ assert all(not list(root.glob('lock.*.txt')) for root in roots)
 window.close()
 pump()
 temp.cleanup()
-print('Multiedit UI passed: joined values, dirty borders, deselection commit, batch write, invalid draft restoration, mixed types, and library locks')
+print('Multiedit UI passed: multiple-value placeholders, dirty borders, deselection commit, batch write, invalid draft restoration, mixed types, and library locks')

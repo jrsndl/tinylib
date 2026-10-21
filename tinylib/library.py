@@ -1,57 +1,15 @@
 """Portable library records, legacy database adapter, and safe JSON publication."""
 import copy
-import json
 import os
 import re
 import shlex
-import tempfile
-import time
-from contextlib import contextmanager
 from pathlib import Path
 from .search import parse_query, matches_fields
+# Storage helpers live in storage.py; re-exported because many modules import them from here.
+from .storage import atomic_json, library_lock, read_json  # noqa: F401
+from .thumbnail_cache import INDEX_CACHE_VERSION, cache_root, cached_library_index_path
 
 DATABASE_FILENAME = 'tinylib_data.json'
-
-def read_json(path):
-    with open(path, encoding='utf-8-sig') as stream:
-        return json.load(stream)
-
-
-def atomic_json(path, value):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=path.name + '.', suffix='.tmp', dir=str(path.parent))
-    try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
-            json.dump(value, stream, indent=2, ensure_ascii=False)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
-
-
-@contextmanager
-def library_lock(root, timeout=15):
-    """Exclusive create works across processes and SMB; never break another writer's lock."""
-    lock = Path(root) / '.tinylib-write.lock'
-    end = time.monotonic() + timeout
-    while True:
-        try:
-            fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            break
-        except FileExistsError:
-            if time.monotonic() >= end:
-                raise RuntimeError('Library is locked by another writer: ' + str(lock))
-            time.sleep(.1)
-    try:
-        os.write(fd, ('PID %s\n' % os.getpid()).encode())
-        os.close(fd)
-        yield
-    finally:
-        lock.unlink()
-
 
 def split_sequence(value):
     match = re.match(r'^(.*?)\s+(-?\d+)-(-?\d+)$', str(value))
@@ -109,6 +67,18 @@ def safe_component(value):
     return value
 
 
+def _legacy_frame_rate(metadata):
+    """Old databases stored FPS (sometimes as '24000/1001'); the schema key is frame_rate."""
+    if not isinstance(metadata, dict) or 'frame_rate' in metadata or 'FPS' not in metadata:
+        return None
+    from fractions import Fraction
+    try:
+        value = float(Fraction(str(metadata['FPS'])))
+    except (ValueError, ZeroDivisionError):
+        return None
+    return value if 0 < value < 1000 else None
+
+
 class Library:
     def __init__(self, root, name=None, legacy_roots=(), index_cache_root=None):
         self.root = Path(root)
@@ -140,13 +110,16 @@ class Library:
         cache_path = None
         if use_cache:
             try:
-                from .thumbnail_cache import cache_root, cached_library_index_path
                 local_root = self.index_cache_root or cache_root()
                 cache_path = cached_library_index_path(local_root, database, self.root,
                                                        self.name, self.legacy_roots)
                 if cache_path.is_file():
                     cached = read_json(cache_path)
-                    if cached.get('index_cache_version') == 2:
+                    if cached.get('index_cache_version') == INDEX_CACHE_VERSION:
+                        try:
+                            os.utime(cache_path)  # Mark as used for the cache prune.
+                        except OSError:
+                            pass
                         self.assets = cached['assets']
                         self.index_cache_hit = True
                         return self.assets
@@ -180,7 +153,6 @@ class Library:
                 progress(index, total)
         if cache_path is None:
             try:
-                from .thumbnail_cache import cache_root, cached_library_index_path
                 local_root = self.index_cache_root or cache_root()
                 cache_path = cached_library_index_path(local_root, database, self.root,
                                                        self.name, self.legacy_roots)
@@ -188,7 +160,7 @@ class Library:
                 cache_path = None
         if cache_path:
             try:
-                atomic_json(cache_path, {'index_cache_version': 2, 'assets': self.assets})
+                atomic_json(cache_path, {'index_cache_version': INDEX_CACHE_VERSION, 'assets': self.assets})
             except OSError:
                 pass
         return self.assets
@@ -222,6 +194,11 @@ class Library:
         result.setdefault('kind', 'still')
         result['kind'] = canonical_type(result['kind'])
         result.setdefault('metadata', {})
+        legacy_rate = _legacy_frame_rate(result['metadata'])
+        if legacy_rate is not None:
+            # Migrate rather than duplicate: the properties panel would otherwise show both.
+            result['metadata']['frame_rate'] = legacy_rate
+            result['metadata'].pop('FPS', None)
         result.setdefault('colorspace', 'ACEScg')
         result['library'] = self.name
         result['library_root'] = str(self.root)
@@ -235,7 +212,8 @@ class Library:
         for folder in sorted(folders):
             if any(part.startswith('.') for part in folder.relative_to(self.root).parts):
                 continue
-            sources = sorted(p for p in folder.iterdir() if p.is_file())
+            # Older rescans wrote <name>_meta.json sidecars into main/; they are not media.
+            sources = sorted(p for p in folder.iterdir() if p.is_file() and p.suffix.casefold() != '.json')
             if not sources:
                 continue
             try:
@@ -358,19 +336,33 @@ class Library:
         return updated
 
     def publish(self, record, staging=None, edit_token=None):
-        """Reread under lock, preserve legacy DB backup, publish completed assets only."""
+        """Reread under lock and append one completed asset to the current database.
+
+        A schema 3 database is patched in place, so other records and unknown
+        top-level keys are kept exactly as stored. A legacy database is backed up
+        once and converted.
+        """
         with library_lock(self.root):
             from .edit_lock import assert_edit_write_allowed
             assert_edit_write_allowed(self.root, edit_token)
-            self.load()
-            if any(a['id'] == record['id'] for a in self.assets):
-                raise ValueError('Asset already exists in database: ' + record['id'])
             database = self.root / DATABASE_FILENAME
-            if database.exists() and read_json(database).get('schema_version') != 3:
+            document = read_json(database) if database.exists() else None
+            if document is not None and document.get('schema_version') == 3:
+                existing = document['assets']
+            else:
+                # Legacy or missing database: read fresh, never from the local index cache.
+                existing = [self.portable(asset) for asset in self.load(use_cache=False)]
+            if any(asset.get('id') == record['id'] for asset in existing):
+                raise ValueError('Asset already exists in database: ' + record['id'])
+            if document is not None and document.get('schema_version') != 3:
                 backup = self.root / 'data.legacy.backup.json'
                 if not backup.exists():
                     with open(backup, 'xb') as stream:
                         stream.write(database.read_bytes())
+            if document is None or document.get('schema_version') != 3:
+                document = {'schema_version': 3, 'asset_type_schema_version': 1, 'assets': existing}
+            document['assets'] = list(existing) + [self.portable(record)]
+            document.setdefault('asset_type_schema_version', 1)
             destination = self.root / record['category'] / record['name']
             if staging:
                 if destination.exists():
@@ -378,8 +370,7 @@ class Library:
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 Path(staging).rename(destination)
             try:
-                atomic_json(database, {'schema_version': 3, 'asset_type_schema_version': 1,
-                    'assets': [self.portable(a) for a in self.assets] + [self.portable(record)]})
+                atomic_json(database, document)
             except Exception:
                 if staging:
                     destination.rename(staging)

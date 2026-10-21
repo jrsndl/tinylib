@@ -1,4 +1,5 @@
 """Safe, plain-text tile templates; no expressions or attribute evaluation."""
+from functools import lru_cache
 import string
 from .filters import duration
 
@@ -9,6 +10,11 @@ TOKENS = ('name', 'library', 'category', 'type', 'colorspace', 'tags', 'width', 
 def validate_template(template):
     if not isinstance(template, str) or len(template) > 1024:
         raise ValueError('Tile text must be at most 1024 characters.')
+    return _validate(template)
+
+
+@lru_cache(maxsize=32)  # Called for every tile on every animation frame.
+def _validate(template):
     expanded = template.replace('\\n', '\n')
     if len(expanded.split('\n')) > 6:
         raise ValueError('Tile text supports up to six lines.')
@@ -23,6 +29,6 @@ def render_template(template, asset):
     seconds = duration(asset)
     values = {key: asset.get(key) for key in TOKENS}
     values.update(type=asset.get('kind', 'still').upper(), tags=', '.join(asset.get('tags', [])),
-                  width=metadata.get('width'), height=metadata.get('height'), fps=metadata.get('FPS'),
+                  width=metadata.get('width'), height=metadata.get('height'), fps=metadata.get('frame_rate', metadata.get('FPS')),
                   length='%.2f' % seconds if seconds is not None else None)
     return validate_template(template).format_map({key: '—' if value is None else str(value).replace('\n', ' ').replace('\r', ' ') for key, value in values.items()})

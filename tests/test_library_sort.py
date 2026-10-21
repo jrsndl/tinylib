@@ -9,6 +9,7 @@ from tinylib.access import AccessControl
 from tinylib.edit_lock import LibraryEditLocked, acquire_edit_lock, read_edit_locks, release_edit_lock
 from tinylib.library import atomic_json, read_json
 from tinylib.library_tools import sort_library
+from helpers import requires_qt
 
 
 class LibrarySortTests(unittest.TestCase):
@@ -101,6 +102,7 @@ class LibrarySortTests(unittest.TestCase):
         self.assertEqual(self.database.read_bytes(), before)
         self.assertFalse(read_edit_locks(self.root))
 
+    @requires_qt
     def test_background_dialog_sorts_and_reports_completion(self):
         os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
         from tinylib.qt import QtWidgets
@@ -118,12 +120,13 @@ class LibrarySortTests(unittest.TestCase):
         self.assertFalse(dialog.isVisible())
         self.assertFalse(read_edit_locks(self.root))
 
+    @requires_qt
     def test_browser_action_sorts_selected_library_and_reloads_without_cache(self):
         os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
         from unittest.mock import Mock
         from tinylib.qt import QtCore, QtWidgets
         from tinylib.ui import Browser
-        app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        _app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
         host = QtWidgets.QWidget()
         host.access, host.settings, host.edit_session = self.access, self.settings, None
         host.categories = QtWidgets.QTreeWidget(host)

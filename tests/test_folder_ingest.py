@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 from tinylib.access import AccessControl
 from tinylib.ingest import discover_footage_sources, make_folder_manifests
+from helpers import requires_qt
 
 
 class FolderIngestTests(unittest.TestCase):
@@ -65,6 +66,7 @@ class FolderIngestTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'Asset folder already exists'):
                 self.prepare()
 
+    @requires_qt
     def test_worker_prepares_every_source_before_submitting_any_job(self):
         from tinylib.ingest_ui import Submission
         args = (self.settings, self.library, 'source', 'effects', str(self.source), [],

@@ -1,5 +1,7 @@
 # Processing audit
 
+This is a historical audit of the old processing scripts, written when TinyLib's farm processing replaced them.
+
 Inspected the four supplied `oldscripts/*.py` scripts and the `.bat` presets and `--help` output under `<transcoder installation>`.
 
 The old thumbnail script chooses the largest compressed source frame, which is a useful approximation for active content in smoke/fire sequences. It uses an ACES 1.2 OCIO conversion from `ACES - ACEScg` to `Output - Rec.709`. Its executable and OCIO paths refer to machine-specific locations. It sets a 960×540 variable but the active OIIO command only resizes to width 960; it does not guarantee the requested 960×506 thumbnail canvas.
@@ -17,4 +19,4 @@ Locally available tools:
 
 No binaries or old scripts were edited. The optional VFX Transcode backend runs on the staged main sequence, so its temporary files cannot be written into the source asset.
 
-Reference documentation: [OpenImageIO fit and color conversion](https://openimageio.readthedocs.io/en/v3.1.12.1/oiiotool.html) and [Deadline Python plugin](https://docs.thinkboxsoftware.com/products/deadline/10.3/1_User%20Manual/manual/app-python.html).
+Reference documentation: [OpenImageIO fit and color conversion](https://openimageio.readthedocs.io/en/v3.1.12.1/oiiotool.html) and [Deadline Python plugin](https://docs.thinkboxsoftware.com/products/deadline/10.4/1_User%20Manual/manual/app-python.html).

@@ -82,8 +82,9 @@ class AssetTypeTests(unittest.TestCase):
         self.assertEqual(job['kind'], 'model')
         self.assertEqual(job['metadata']['faces'], 123)
         self.assertEqual(job['ingest_user'], self.settings['_access'].identity)
-        from datetime import datetime
-        self.assertEqual(job['ingest_date'], datetime.now().strftime('%Y%m%d'))
+        from datetime import datetime, timedelta
+        now = datetime.now()  # The manifest may have been made just before midnight.
+        self.assertIn(job['ingest_date'], {now.strftime('%Y%m%d'), (now - timedelta(days=1)).strftime('%Y%m%d')})
         with self.assertRaises(ValueError):
             make_manifest(self.settings, self.library, 'Tree2', 'models', str(source), [], '',
                           'preview', {'thumb': {'mode': 'generate', 'path': ''}}, kind='model')

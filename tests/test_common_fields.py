@@ -2,7 +2,7 @@ import copy
 import tempfile
 import unittest
 from pathlib import Path
-from tinylib.access import AccessControl, default_permissions
+from tinylib.access import AccessControl
 from tinylib.actions import ActionRegistry
 from tinylib.asset_edit import save_asset
 from tinylib.asset_fields import DEFAULT_FIELDS, validate_fields

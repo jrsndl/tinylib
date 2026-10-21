@@ -6,6 +6,9 @@ import sys
 import uuid
 from pathlib import Path
 from .library import read_json, split_sequence
+from .log import get_logger
+
+log = get_logger(__name__)
 
 
 def host_name():
@@ -39,6 +42,9 @@ class Action:
         if self.allow_only is not None and (not isinstance(self.allow_only, list) or
                 not all(isinstance(group, str) and group.strip() for group in self.allow_only)):
             raise ValueError('allow_only must be a list of group names.')
+        callable_name = self.manifest.get('callable', 'run')
+        if not isinstance(callable_name, str) or not callable_name.isidentifier():
+            raise ValueError('callable must be a Python function name.')
         self.code = local_file(self.folder, self.manifest.get('entrypoint', 'action.py'))
         if self.code.suffix != '.py' or not self.code.is_file():
             raise ValueError('Action needs a Python entrypoint.')
@@ -124,6 +130,7 @@ class ActionRegistry:
         if action.id != identifier or not self.allowed(action, assets, access):
             raise PermissionError('Action is not permitted for this selection.')
         config = read_json(action.config_path)
+        log.info('%s runs action %s on %d asset(s)', access.identity, action.id, len(assets))
         module_name = '_tinylib_action_' + uuid.uuid4().hex
         spec = importlib.util.spec_from_file_location(module_name, action.code)
         module = importlib.util.module_from_spec(spec)

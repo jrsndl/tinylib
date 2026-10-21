@@ -1,45 +1,26 @@
 """Media metadata probing and discrepancy comparison for library maintenance."""
 import json
 import math
-import os
 import re
-import subprocess
 import xml.etree.ElementTree as ET
 from datetime import datetime
-from fractions import Fraction
 from pathlib import Path
 
 from .asset_types import extension_groups
+from .media_probe import PROBE_TIMEOUT, number, pixel_aspect, run_tool
 from .ingest import clean_asset_name
 from .library import atomic_json, frame_path
 
-DATABASE_METADATA_FIELDS = ('FPS', 'width', 'height')
+DATABASE_METADATA_FIELDS = ('frame_rate', 'width', 'height')
 
 
 def _run(args):
-    result = subprocess.run([str(value) for value in args], capture_output=True,
-                            text=True, errors='replace',
-                            creationflags=0x08000000 if os.name == 'nt' else 0)
-    if result.returncode:
-        raise RuntimeError((result.stderr or result.stdout or 'Metadata tool failed.')[-8000:])
-    return result.stdout
+    return run_tool(args, timeout=PROBE_TIMEOUT).stdout
 
 
-def _number(value):
-    if value in (None, '', 'N/A', '0/0'):
-        return None
-    try:
-        return float(Fraction(str(value)))
-    except (ValueError, ZeroDivisionError):
-        try:
-            return float(value)
-        except (ValueError, TypeError):
-            return None
-
-
-def _pixel_aspect(value):
-    number = _number(str(value).replace(':', '/'))
-    return number if number and number > 0 else 1.0
+# Kept as module names because other modules and tests use them.
+_number = number
+_pixel_aspect = pixel_aspect
 
 
 def _first(mapping, names):
@@ -67,7 +48,7 @@ def _probe_image(path, oiiotool):
     if reelid is not None:
         result['reelid'] = str(reelid)
     if frame_rate:
-        result['FPS'] = frame_rate
+        result['frame_rate'] = frame_rate
     return result, {'format': 'oiiotool_xml', 'xml': output, 'attributes': attributes}
 
 
@@ -94,7 +75,7 @@ def _probe_container(path, ffprobe):
     result = {'width': int(stream['width']), 'height': int(stream['height']),
               'pixel_aspect': _pixel_aspect(stream.get('sample_aspect_ratio', '1:1'))}
     if fps:
-        result['FPS'] = fps
+        result['frame_rate'] = fps
     if frames is not None:
         result['duration_frames'] = frames
     if duration is not None:
@@ -130,15 +111,13 @@ def scan_source_metadata(value, settings):
                 probe_image(sample, tools.get('oiiotool', 'oiiotool')))
     if first is not None:
         metadata.update(frame_start=first, frame_end=last, duration_frames=last - first + 1)
-        if metadata.get('FPS'):
-            metadata['duration_seconds'] = metadata['duration_frames'] / metadata['FPS']
+        if metadata.get('frame_rate'):
+            metadata['duration_seconds'] = metadata['duration_frames'] / metadata['frame_rate']
     elif metadata.get('duration_frames') is not None:
         metadata.update(frame_start=0, frame_end=metadata['duration_frames'] - 1)
     metadata['is_raw'] = sample.suffix.casefold().lstrip('.') in extension_groups(settings)['extensions_stills_raw']
     metadata['file_size_main'] = sum(path.stat().st_size for path in files)
     metadata['file_size_total'] = metadata['file_size_main']
-    if 'FPS' in metadata:
-        metadata['frame_rate'] = metadata.pop('FPS')
     return metadata
 
 
@@ -171,8 +150,8 @@ def scan_asset_metadata(asset, settings, include_full=False):
         if sequence and type(first) is int and type(last) is int:
             frames = last - first + 1
             scanned.update(duration_frames=frames, frame_start=first, frame_end=last)
-            if scanned.get('FPS'):
-                scanned['duration_seconds'] = frames / scanned['FPS']
+            if scanned.get('frame_rate'):
+                scanned['duration_seconds'] = frames / scanned['frame_rate']
         elif container and scanned.get('duration_frames') is not None:
             start = first if type(first) is int else 0
             scanned.update(frame_start=start, frame_end=start + scanned['duration_frames'] - 1)
@@ -196,7 +175,11 @@ def metadata_sidecar_path(asset):
     source = main
     if sequence and type(asset.get('first')) is int and type(asset.get('last')) is int:
         source += ' %d-%d' % (asset['first'], asset['last'])
-    return Path(main).parent / (clean_asset_name(source) + '_meta.json')
+    # Beside the representation folders, never inside main/: main must hold only the source media.
+    folder = Path(main).parent
+    if folder.name.casefold() == 'main':
+        folder = folder.parent
+    return folder / (clean_asset_name(source) + '_meta.json')
 
 
 def values_equal(stored, scanned):

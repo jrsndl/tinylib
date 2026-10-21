@@ -17,7 +17,10 @@ def parse_query(query):
     def extract(match):
         excluded, key, operator, term = match.groups()
         if term.startswith(('"', "'")):
-            term = shlex.split(term)[0]
+            try:
+                term = shlex.split(term)[0]
+            except ValueError:  # Unbalanced quotes or a trailing escape: search the text as typed.
+                term = term[1:-1] if len(term) > 1 and term[-1] == term[0] else term[1:]
         clauses.append((field_name(key), term.casefold(), bool(excluded) ^ (operator == '!')))
         return ' '
     plain = FIELD_FILTER.sub(extract, query)
