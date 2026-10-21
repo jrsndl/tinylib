@@ -89,7 +89,8 @@ Example `action.py`, with `config.json` containing `{}`:
 def run(assets, context, config):
     # assets: copies of normalized TinyLib records (main, proxy, first, last,
     # library_root, colorspace, metadata, tags, etc.).
-    # context: identity, parent Qt widget, settings, collection name or None.
+    # context: identity, parent Qt widget, settings, collection name or None,
+    # trim: a function returning an asset's (in, out) points, or None.
     # config: this action's configuration JSON.
     return "Processed %d assets" % len(assets)
 ```

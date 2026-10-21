@@ -37,12 +37,9 @@ def _probe_image(path, oiiotool):
     attributes = {item.get('name', ''): item.text or '' for item in spec.findall('.//attrib')}
     result = {'width': int(spec.findtext('width')), 'height': int(spec.findtext('height')),
               'pixel_aspect': _pixel_aspect(_first(attributes, ('PixelAspectRatio', 'pixelAspectRatio')) or 1)}
-    colorspace = _first(attributes, ('oiio:ColorSpace', 'ColorSpace', 'colorspace'))
     timecode = _first(attributes, ('smpte:TimeCode', 'timecode', 'TimeCode'))
     reelid = _first(attributes, ('reelid', 'ReelName', 'reel_name', 'oiio:subimagename'))
     frame_rate = _number(_first(attributes, ('FramesPerSecond', 'frame_rate', 'framerate', 'fps')))
-    if colorspace is not None:
-        result['colorspace'] = str(colorspace)
     if timecode is not None:
         result['timecode'] = str(timecode)
     if reelid is not None:
@@ -80,11 +77,8 @@ def _probe_container(path, ffprobe):
         result['duration_frames'] = frames
     if duration is not None:
         result['duration_seconds'] = duration
-    colorspace = stream.get('color_space') or _first(tags, ('colorspace', 'ColorSpace'))
     timecode = _first(tags, ('timecode', 'TIMECODE'))
     reelid = _first(tags, ('reel_name', 'reelid', 'REEL'))
-    if colorspace:
-        result['colorspace'] = str(colorspace)
     if timecode:
         result['timecode'] = str(timecode)
     if reelid:

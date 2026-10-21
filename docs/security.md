@@ -41,7 +41,7 @@ Copy `tinylib.ini.example` to start. Relative paths resolve beside the ini. Envi
    python -m tinylib.admin show
    ```
 
-5. Start TinyLib as that admin. Add libraries with **Library tools → Create New Library…**, which registers them in both the browser configuration and `security.json`. To add them by hand, add the same root to `libraries` in both files. Then add artists in **Access rights…** or with `add-user <account> users`.
+5. Start TinyLib as that admin. Add libraries with **Library tools → Create new library…**, which registers them in both the browser configuration and `security.json`. To add them by hand, add the same root to `libraries` in both files. Then add artists in **Access rights…** or with `add-user <account> users`.
 
 `add-user` accepts groups after the account (`add-user "studio\joe" users restricted`). Without groups it adds the account to `admins`. `remove-user` refuses to remove the last admin.
 

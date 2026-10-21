@@ -42,7 +42,7 @@ window.show()
 assert '#ffa02f' in window.styleSheet() and 'url(:images/' not in window.styleSheet()
 assert window.library_tools_button.isVisible()
 assert [action.text() for action in window.library_tools_button.menu().actions()] == [
-    'Library crosscheck…', 'Rescan Metadata…', 'Library Sort...', 'Create New Library...']
+    'Library crosscheck…', 'Rescan metadata…', 'Library sort…', 'Create new library…']
 assert 'font-size' not in STYLE and 'font-family' not in STYLE
 assert window.font().family() == UI_FONT_FAMILY and window.font().pointSize() == UI_FONT_SIZE
 

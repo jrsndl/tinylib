@@ -32,8 +32,8 @@ Field searches combine with normal terms. `fire {acquire price}:usd` requires bo
 
 The filtering panel combines:
 
-- fulltext search, with an **Invert** checkbox that applies only to fulltext;
-- comma-separated exact tags (all must match);
+- **Search**: all terms must match; put `!` before a term to exclude it (`!burst`, `!"big burst"`, `{tags}!fire`);
+- **Pick tag…**, which adds `{tags}:<tag>` to the search (several picked tags must all match);
 - media type;
 - duration in seconds, pixel width and star count. Numeric filters offer `>`, `<` and `=`; select **Any** to disable a rule.
 
@@ -81,7 +81,7 @@ Star ratings are personal. The five stars in the top controls set the rating of 
 
 ## Collections
 
-**Collections** opens a scratchpad between the main view and properties. It starts hidden every time.
+**Collections** opens a scratchpad between the main view and properties. It starts hidden every time. **Details**, to its right, shows or hides the asset details panel; it is on by default, TinyLib remembers your choice, and **Edit** shows the panel again.
 
 - Create collections with **New** (collection01, collection02, …), rename or delete them. Deleting a collection never deletes media.
 - Drag a main-view selection onto the collection list. With no collections, the first one is created automatically. Duplicate picks in one collection are ignored.
@@ -90,7 +90,7 @@ Star ratings are personal. The five stars in the top controls set the rating of 
 - Collections are independent of the current search or category, with their own **Tiles / Details / List** selector and **Play all** toggle. Select items to preview or rate them. Unavailable assets stay listed with an unavailable label, so references are not lost silently.
 - The collection action dropdown runs an action on the whole collection. A collection with unresolved references cannot run an action partially.
 - **Copy** uses the selected Paths notation. A partial selection copies only those items; no selection or a complete selection copies the whole collection.
-- **Export / Import** exchange simple JSON files; both file browsers start in Downloads. Imports create a new collection, adding a numeric suffix for duplicate names. Files contain references, not media; assets resolve through configured, permitted libraries with matching roots and main paths.
+- **Export / Import** exchange simple JSON files, including each asset's in and out points; both file browsers start in Downloads. Imports create a new collection, adding a numeric suffix for duplicate names. Files contain references, not media; assets resolve through configured, permitted libraries with matching roots and main paths.
 
 ### Where personal data is stored
 
@@ -110,12 +110,22 @@ The player decodes the proxy (or the thumbnail for stills) with FFmpeg and start
 | **K** | Stop at the current position and reset speed to 1×. |
 | **Space** | Stop, or start forward playback at 1×. |
 | **Left / Right** | Stop and step one frame backward / forward. |
-| **O** | Toggle the frame-number overlay. |
+| **I / O** | Footage: set the in / out point at the current frame. An in point after the out point moves the out point to the end, and the reverse. |
+| **Alt+X** | Clear the in and out points (the whole clip plays again). |
+| **F** | Toggle the frame-number overlay. |
 | **0–5** | Set the asset's personal star rating; `0` clears it. |
 | **Ctrl+C** | While stopped, copy the current proxy frame to the clipboard at the proxy's native resolution, without overlay or controls. |
 | **Hover near the bottom** | Reveal the timeline and current time; click or drag its indicator to scrub. Scrubbing stops playback. |
-| **Loop** | On by default for each player window. Wraps in both directions; when off, playback stops at either end and resets speed. |
+| **Loop** | On by default for each player window. Wraps in both directions between the in and out points (the whole clip when none are set); when off, playback stops at the in or out point and resets speed. |
 | **Esc / Q** | Close the player. |
+
+### In and out points
+
+In and out points trim footage for review. They are personal, like star ratings: each artist has their own, they are kept in your preferences file, and the library database never changes. The timeline shows them as a blue band with end marks, and the time line reads `In 1012 · Out 1080`. The player opens at the in point and plays only from in to out.
+
+Copied and dragged paths use the in and out points as the frame range in the **Nuke**, **AYON** and **Flame** notations (for example `shot.####.exr 1012-1080`); the other notations carry no range. Copying from a collection uses the collection's points.
+
+A player opened from a collection uses that collection's in and out points instead of yours, and **I**, **O** and **Alt+X** change the collection's. Adding an asset to a collection copies your current points into it. Exported collections carry their points, so importing a colleague's collection shares them without changing your own.
 
 After a decoding error, seeking to another frame retries. A studio can switch to the external ffplay player instead (`player_backend`, see [configuration](configuration.md#browser-configuration)); it uses ffplay's own shortcuts and has none of the controls above.
 
@@ -131,7 +141,7 @@ The right panel shows descriptive fields, not media file paths. Read-only identi
 
 With an asset selected in a writable library, administrators and users with that library's edit permission can click **Edit** to change color space, keywords and metadata. The button turns into a red **Write** button.
 
-- **Write** saves the draft and leaves edit mode. **Cancel edit** discards it.
+- **Write** saves the draft and leaves edit mode. **Cancel edit**, which appears beside **Write** while editing, discards it.
 - Selecting another asset saves the current draft automatically and keeps edit mode on. Moving within one library keeps the same lock; unchanged selection jumps write nothing. Moving to another library switches to that library's lock.
 - If validation or writing fails, TinyLib returns to the edited selection and keeps the draft so you can correct or cancel it.
 - If edit mode cannot start (for example, someone else holds the lock), TinyLib leaves edit mode after one message.

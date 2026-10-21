@@ -7,6 +7,7 @@ import math
 from collections import OrderedDict
 from fractions import Fraction
 from .qt import QtCore, QtGui, QtWidgets, event_pos
+from .trim import advance_frame, clean_trim
 
 
 def media_info(asset, stream):
@@ -198,7 +199,30 @@ class Timeline(QtWidgets.QSlider):
         self.setFocusPolicy(QtCore.Qt.NoFocus)
         self.setMouseTracking(True)
         self.dragging = False
+        self.trim = None  # (in, out) slider values, shown as a band with end marks.
         self.setAccessibleName('Preview timeline')
+
+    def value_x(self, value):
+        option = QtWidgets.QStyleOptionSlider()
+        self.initStyleOption(option)
+        groove = self.style().subControlRect(QtWidgets.QStyle.CC_Slider, option, QtWidgets.QStyle.SC_SliderGroove, self)
+        handle = self.style().subControlRect(QtWidgets.QStyle.CC_Slider, option, QtWidgets.QStyle.SC_SliderHandle, self)
+        span = max(1, groove.width() - handle.width())
+        return groove.x() + handle.width() // 2 + QtWidgets.QStyle.sliderPositionFromValue(
+            self.minimum(), self.maximum(), value, span)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not self.trim:
+            return
+        painter = QtGui.QPainter(self)
+        left, right = self.value_x(self.trim[0]), self.value_x(self.trim[1])
+        middle = self.height() // 2
+        painter.fillRect(QtCore.QRect(left, middle - 5, max(1, right - left), 10), QtGui.QColor(110, 170, 230, 90))
+        painter.setPen(QtGui.QPen(QtGui.QColor('#7fb8ee'), 2))
+        for x in (left, right):
+            painter.drawLine(x, middle - 8, x, middle + 8)
+        painter.end()
 
     def position_value(self, event):
         option = QtWidgets.QStyleOptionSlider()
@@ -234,6 +258,7 @@ class ReviewPlayer(QtWidgets.QWidget):
     closed = QtCore.Signal()
     frame_shown = QtCore.Signal(int)
     rating_requested = QtCore.Signal(int)
+    trim_requested = QtCore.Signal(object)  # (in, out) in asset frame numbers, or None for the whole range.
 
     def __init__(self, settings, asset, stream, parent=None):
         super().__init__(parent, QtCore.Qt.Window)
@@ -244,10 +269,18 @@ class ReviewPlayer(QtWidgets.QWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(QtCore.Qt.StrongFocus)
         self.setToolTip('J/L: reverse/forward, repeat for speed · K: stop · Space: play/stop\n'
-                        'Left/Right: one frame · O: frame overlay · Ctrl+C: copy stopped frame at full resolution\n'
+                        'Left/Right: one frame · I/O: set in/out point · Alt+X: clear in/out\n'
+                        'F: frame overlay · Ctrl+C: copy stopped frame at full resolution\n'
                         'Hover bottom: timeline and Loop')
         self.fps, self.count = media_info(asset, stream)
         self.first = int(asset['first']) if asset.get('first') is not None else 1
+        self.footage = asset.get('kind') == 'footage'
+        # In/out points as frame indexes; the whole range when none are set.
+        self.in_point, self.out_point = 0, self.count - 1
+        trim = clean_trim(asset.get('_trim')) if self.footage else None
+        if trim:
+            self.in_point = max(0, min(self.count - 1, trim[0] - self.first))
+            self.out_point = max(self.in_point, min(self.count - 1, trim[1] - self.first))
         self.current = 0
         self.target = 0
         self.direction, self.speed = (1 if self.count > 1 else 0), 1
@@ -295,6 +328,8 @@ class ReviewPlayer(QtWidgets.QWidget):
         self.timeline.valueChanged.connect(self.scrub)
         layout.addWidget(self.timeline)
         self.bar.hide()
+        if self.trimmed():
+            self.current = self.target = self.in_point
         self.debounce = QtCore.QTimer(self)
         self.debounce.setSingleShot(True)
         self.debounce.setInterval(35)
@@ -311,7 +346,7 @@ class ReviewPlayer(QtWidgets.QWidget):
         self.timer.timeout.connect(self.tick)
         self.timer.start()
         self.update_indicator()
-        QtCore.QTimer.singleShot(0, lambda: self.decoder.request(0))
+        QtCore.QTimer.singleShot(0, lambda: self.decoder.request(self.target))
 
     def update_indicator(self):
         def stamp(frame):
@@ -320,7 +355,9 @@ class ReviewPlayer(QtWidgets.QWidget):
             minutes, seconds = divmod(seconds, 60)
             return '%02d:%02d.%03d' % (minutes, seconds, ms)
         state = ('Reverse' if self.direction < 0 else 'Forward') + ' %d×' % self.speed if self.direction else 'Stopped · 1×'
-        self.time_label.setText('%s / %s     %s' % (stamp(self.current), stamp(self.count - 1), state))
+        trim = '     In %d · Out %d' % (self.first + self.in_point, self.first + self.out_point) if self.trimmed() else ''
+        self.time_label.setText('%s / %s     %s%s' % (stamp(self.current), stamp(self.count - 1), state, trim))
+        self.timeline.trim = (self.in_point, self.out_point) if self.trimmed() else None
         if not self.scrubbing:
             self.timeline.blockSignals(True)
             self.timeline.setValue(self.current)
@@ -332,9 +369,32 @@ class ReviewPlayer(QtWidgets.QWidget):
         self.clock.restart()
         self.update_indicator()
 
+    def trimmed(self):
+        return (self.in_point, self.out_point) != (0, self.count - 1)
+
+    def set_trim(self, in_point, out_point, message):
+        self.in_point, self.out_point = in_point, out_point
+        trim = (self.first + in_point, self.first + out_point) if self.trimmed() else None
+        self.trim_requested.emit(trim)
+        self.rating_feedback = message
+        self.rating_timer.start()
+        self.update_indicator()
+        self.timeline.update()
+
+    def mark_in(self):
+        # An in point after the out point moves the out point back to the end.
+        out_point = self.out_point if self.current <= self.out_point else self.count - 1
+        self.set_trim(self.current, out_point, 'In: %d' % (self.first + self.current))
+
+    def mark_out(self):
+        in_point = self.in_point if self.current >= self.in_point else 0
+        self.set_trim(in_point, self.current, 'Out: %d' % (self.first + self.current))
+
     def play_direction(self, direction):
         if self.count <= 1 or self.failure:
             return
+        if not self.in_point <= self.target <= self.out_point:
+            self.seek(self.in_point if direction > 0 else self.out_point)
         self.speed = min(self.speed * 2, 16) if self.direction == direction else 1
         self.direction = direction
         self.fraction = 0.0
@@ -348,6 +408,8 @@ class ReviewPlayer(QtWidgets.QWidget):
     def length_changed(self, count):
         self.count = max(1, count)
         self.timeline.setRange(0, self.count - 1)
+        self.out_point = min(self.out_point, self.count - 1)
+        self.in_point = min(self.in_point, self.out_point)
         if self.target >= self.count:
             self.seek(self.count - 1)
         self.update_indicator()
@@ -383,9 +445,11 @@ class ReviewPlayer(QtWidgets.QWidget):
         advance = int(self.fraction)
         if advance:
             self.fraction -= advance
-            frame = self.current + advance * self.direction
-            self.seek(frame % self.count if self.loop else frame)
-            if not self.loop and (frame <= 0 or frame >= self.count - 1):
+            # Loops (or stops) inside the in/out points; they are the whole range when unset.
+            frame, stop = advance_frame(self.current + advance * self.direction,
+                                        self.in_point, self.out_point, self.loop)
+            self.seek(frame)
+            if stop:
                 self.stop_playback()
         # Warm the next chunk in the current direction while cached frames play.
         boundary = ((self.current // self.decoder.CHUNK) + (1 if self.direction > 0 else 0)) * self.decoder.CHUNK
@@ -456,10 +520,19 @@ class ReviewPlayer(QtWidgets.QWidget):
         key = event.key()
         ratings = {QtCore.Qt.Key_0: 0, QtCore.Qt.Key_1: 1, QtCore.Qt.Key_2: 2,
                    QtCore.Qt.Key_3: 3, QtCore.Qt.Key_4: 4, QtCore.Qt.Key_5: 5}
-        if key in ({QtCore.Qt.Key_J, QtCore.Qt.Key_K, QtCore.Qt.Key_L, QtCore.Qt.Key_Space, QtCore.Qt.Key_O} | set(ratings)) and event.isAutoRepeat():
+        if key in ({QtCore.Qt.Key_J, QtCore.Qt.Key_K, QtCore.Qt.Key_L, QtCore.Qt.Key_Space, QtCore.Qt.Key_F,
+                    QtCore.Qt.Key_I, QtCore.Qt.Key_O, QtCore.Qt.Key_X} | set(ratings)) and event.isAutoRepeat():
             event.accept()
             return
-        if key in ratings:
+        alt = bool(event.modifiers() & QtCore.Qt.AltModifier)
+        if key == QtCore.Qt.Key_X and alt:
+            if self.footage and self.trimmed():
+                self.set_trim(0, self.count - 1, 'In/out cleared')
+        elif key == QtCore.Qt.Key_I and self.footage and self.count > 1:
+            self.mark_in()
+        elif key == QtCore.Qt.Key_O and self.footage and self.count > 1:
+            self.mark_out()
+        elif key in ratings:
             self.rating = ratings[key]
             self.rating_feedback = 'Rating: %d / 5' % self.rating
             self.rating_requested.emit(self.rating)
@@ -477,7 +550,7 @@ class ReviewPlayer(QtWidgets.QWidget):
             self.step(-1)
         elif key == QtCore.Qt.Key_Right:
             self.step(1)
-        elif key == QtCore.Qt.Key_O:
+        elif key == QtCore.Qt.Key_F:
             self.overlay = not self.overlay
             self.update()
         elif key in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Q):

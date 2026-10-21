@@ -141,5 +141,61 @@ class PreferenceTests(unittest.TestCase):
         self.assertEqual([item.read_text() for item in aside], ['invalid'])
 
 
+class TrimTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.path = self.root / 'preferences.json'
+        self.prefs = Preferences(self.path)
+
+    def test_user_trims_are_per_user_and_survive_restart(self):
+        self.assertIsNone(self.prefs.trim(asset()))
+        self.prefs.set_trim(asset(), (1010, 1050))
+        self.assertEqual(Preferences(self.path).trim(asset()), (1010, 1050))
+        self.assertIsNone(self.prefs.trim(asset('Smoke')))
+        self.prefs.set_trim(asset(), None)
+        self.assertIsNone(Preferences(self.path).trim(asset()))
+        for bad in ((1050, 1010), (1.5, 1060), ('1', '2')):
+            with self.assertRaises(ValueError):
+                self.prefs.set_trim(asset(), bad)
+
+    def test_collections_hold_their_own_trims_and_share_them(self):
+        self.prefs.set_trim(asset(), (1010, 1050))
+        collection = self.prefs.create_collection('Picks')
+        self.prefs.add_assets(collection, [asset(), asset('Smoke')])
+        # Adding copies the user's in/out points; the collection then keeps its own.
+        self.assertEqual(self.prefs.trim(asset(), collection), (1010, 1050))
+        self.assertIsNone(self.prefs.trim(asset('Smoke'), collection))
+        self.prefs.set_trim(asset(), (1020, 1030), collection)
+        self.assertEqual(self.prefs.trim(asset(), collection), (1020, 1030))
+        self.assertEqual(self.prefs.trim(asset()), (1010, 1050))
+        exported = self.root / 'picks.json'
+        self.prefs.export_collection(collection, exported)
+        other = Preferences(self.root / 'other.json')
+        imported = other.import_collection(exported)
+        self.assertEqual(other.trim(asset(), imported), (1020, 1030))
+        self.assertIsNone(other.trim(asset()))  # Importing never changes the artist's own points.
+        self.assertIsNone(other.trim(asset('Smoke'), imported))
+
+    def test_import_rejects_invalid_trims(self):
+        from tinylib.library import atomic_json
+        bad = dict(asset(), **{'in': 1050, 'out': 1010})
+        atomic_json(self.root / 'bad.json', {'format': 'tinylib.collection', 'version': 2, 'name': 'Bad',
+                                            'assets': [bad]})
+        with self.assertRaisesRegex(ValueError, 'in/out'):
+            self.prefs.import_collection(self.root / 'bad.json')
+
+    def test_playback_stays_inside_in_and_out(self):
+        from tinylib.trim import advance_frame
+        self.assertEqual(advance_frame(51, 10, 50, True), (10, False))
+        self.assertEqual(advance_frame(9, 10, 50, True), (50, False))
+        self.assertEqual(advance_frame(52, 10, 50, True), (11, False))  # Fast playback wraps by the overshoot.
+        self.assertEqual(advance_frame(30, 10, 50, True), (30, False))
+        self.assertEqual(advance_frame(50, 10, 50, False), (50, True))
+        self.assertEqual(advance_frame(10, 10, 50, False), (10, True))
+        self.assertEqual(advance_frame(5, 5, 5, True), (5, False))
+
+
 if __name__ == '__main__':
     unittest.main()

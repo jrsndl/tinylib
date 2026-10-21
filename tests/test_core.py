@@ -106,6 +106,14 @@ class LibraryTests(unittest.TestCase):
         self.assertFalse((self.root / 'still/Asset').exists())
         self.assertFalse((self.root / 'tinylib_data.json').exists())
         self.assertEqual(json.loads(path.with_suffix('.status.json').read_text())['state'], 'failed')
+        self.assertTrue((self.root / '.tinylib-staging/testjob').is_dir())  # Kept for diagnosis.
+        # A retry (on any worker) clears the failed attempt's staging and starts over.
+        (self.root / '.tinylib-staging/testjob/leftover.tmp').write_text('x')
+        with patch('tinylib.processing.Processor.generate', side_effect=RuntimeError('second failure')):
+            with self.assertRaisesRegex(RuntimeError, 'second failure'):
+                process(path, access=AccessControl({'_config_path': str(self.root / 'studio.json')}, identity='test', persist=False))
+        self.assertEqual([p.name for p in (self.root / '.tinylib-staging').iterdir()], ['testjob'])
+        self.assertFalse((self.root / '.tinylib-staging/testjob/leftover.tmp').exists())
 
     def test_deadline_job_and_safe_arguments(self):
         worker = self.root / 'worker script.py'

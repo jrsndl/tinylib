@@ -2,7 +2,7 @@
 
 Administrators are members of the `admins` group in the studio security file. Setting up that file, the first administrator and Windows permissions is covered in [security setup](security.md). Groups, grants and action packages are covered in [studio actions and access](actions-and-access.md). Every configuration key is listed in the [configuration reference](configuration.md).
 
-Administrators see three extra controls:
+Administrators see three extra controls; they are hidden for everyone else, and each re-checks the security file when used, so an account removed from `admins` loses them at once:
 
 - **Access rights…** edits users, groups, studio defaults and per-library grants in the security file. Saving needs membership of `admins` and Windows write permission on the file. Rows without an account name are rejected, and removing your own admin rights asks for confirmation.
 - **Configuration…** opens the active browser configuration file.
@@ -19,11 +19,13 @@ python -m tinylib.admin remove-user "studio\joe"
 
 ## Library tools
 
+Only members of `admins` can use them. The button is hidden for other accounts, and every tool re-reads the security file when it starts, so an account removed from `admins` while TinyLib is open is refused at once.
+
 ### Library crosscheck…
 
 Checks every path listed in the selected library's `tinylib_data.json`, including sequence frames and relative texture/file lists, then scans each `library/category/asset` folder for assets missing from the JSON. A progress dialog shows the current record or path; **Cancel** or **Esc** stops after the current filesystem check. The report is saved in your Downloads folder as `<library name>_crosscheck_<datetime>.log`.
 
-### Rescan Metadata…
+### Rescan metadata…
 
 Scans the selected Still and Footage assets, or the whole selected library when no assets are selected. Image files and sequences use the configured `oiiotool`; container footage uses `ffprobe`. Each probe times out after 60 seconds. **Cancel** or **Esc** stops after the current probe.
 
@@ -32,11 +34,11 @@ Scans the selected Still and Footage assets, or the whole selected library when 
 - The result view lists discrepancies, sidecars and probe errors. **Write metadata** is offered only when one of the three database fields differs.
 - Confirmed changes are written as one atomic database update per library, under the same [edit lock](#edit-locks) and override workflow as **Edit** / **Write**.
 
-### Library Sort...
+### Library sort…
 
 Sorts the selected writable library's schema version 3 database by category and asset name (case-insensitive), then reloads the browser. Select any category to sort its whole library; from "All libraries", choose the library first. Sorting keeps record contents and uses the same edit lock, administrator override and atomic write as editing. Run it again after new ingests.
 
-### Create New Library...
+### Create new library…
 
 Asks for a name, root folder and settings source: Studio defaults or an existing library. You can change the copied read-only setting.
 
@@ -49,7 +51,7 @@ The browser configuration that receives the entry is the file actually loaded, s
 
 ## Edit locks
 
-Entering edit mode (**Edit**, metadata write, Library Sort) creates `lock.<windows-user>.txt` beside the library's `tinylib_data.json`. The file records the Windows identity, time, computer, process ID and a session token. While it exists:
+Entering edit mode (**Edit**, metadata write, library sort) creates `lock.<windows-user>.txt` beside the library's `tinylib_data.json`. The file records the Windows identity, time, computer, process ID and a session token. While it exists:
 
 - other users see who holds the lock and cannot edit or publish an ingest into that library;
 - administrators are offered **Override lock**, which removes the existing lock files before creating their own. Use it for locks left by a crashed session.
@@ -75,4 +77,4 @@ New records use schema version 3 with relative media paths. The first successful
 
 ## Farm staging
 
-Ingest jobs stage files in `<library>/.tinylib-staging/<job-id>`. Failed jobs keep their staging folder for diagnosis and are not added to the library. Inspect it, then remove only that job's staging folder before retrying the job. See [deployment](deployment.md#deadline-104) for the farm setup.
+Ingest jobs stage files in `<library>/.tinylib-staging/<job-id>`. A failed job keeps its staging folder for diagnosis and is not added to the library. When Deadline retries the job, on the same or another worker, the retry deletes that folder and starts over. If another worker still has files open in it, the retry stops instead. A folder that could not be fully deleted is left as `<job-id>.retry-<code>`; delete it by hand. See [deployment](deployment.md#deadline-104) for the farm setup.

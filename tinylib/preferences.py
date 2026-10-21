@@ -1,4 +1,4 @@
-"""Per-user ratings and named asset collections, independent of library databases."""
+"""Per-user ratings, in/out points and named asset collections, independent of library databases."""
 import copy
 import json
 import os
@@ -6,6 +6,7 @@ import time
 import uuid
 from pathlib import Path
 from .library import atomic_json, library_lock, read_json
+from .trim import clean_trim, stored_trim
 
 ASSET_MIME = 'application/x-tinylib-asset-keys'
 COLLECTION_MIME = 'application/x-tinylib-collection-selection'
@@ -51,6 +52,8 @@ class Preferences:
         data = read_json(self.path) if self.path.exists() else {'version': 1, 'ratings': {}, 'collections': []}
         if data.get('version') != 1 or not isinstance(data.get('ratings'), dict) or not isinstance(data.get('collections'), list):
             raise ValueError('Invalid user preferences: ' + str(self.path))
+        if not isinstance(data.get('trims', {}), dict):
+            raise ValueError('Invalid in/out points in user preferences: ' + str(self.path))
         self.data = data
 
     def change(self, operation):
@@ -90,6 +93,36 @@ class Preferences:
             raise ValueError('Rating must be 0–5 stars.')
         self.change(lambda data: data['ratings'].update({asset_key(a): stars for a in assets}))
 
+    def trim(self, asset, collection=None):
+        """The user's in/out points for an asset, or those stored with it in ``collection``."""
+        key = asset_key(asset)
+        if collection:
+            found = self.find_collection(collection)
+            entry = found['assets'].get(key, {}) if found else {}
+            return clean_trim((entry.get('in'), entry.get('out')))
+        return clean_trim(self.data.get('trims', {}).get(key))
+
+    def set_trim(self, asset, trim, collection=None):
+        """Store in/out points (None clears them) for the user, or for the asset's entry in ``collection``."""
+        if trim is not None and clean_trim(trim) is None:
+            raise ValueError('In and out points must be whole frame numbers with in before out.')
+        value, key = stored_trim(trim), asset_key(asset)
+
+        def store(data):
+            if collection:
+                entry = self.collection(collection)['assets'].get(key)
+                if entry is None:
+                    raise ValueError('This asset is no longer in the collection.')
+                entry.pop('in', None)
+                entry.pop('out', None)
+                if value:
+                    entry.update(value)
+            elif value:
+                data.setdefault('trims', {})[key] = value
+            else:
+                data.setdefault('trims', {}).pop(key, None)
+        self.change(store)
+
     def set_display(self, **values):
         self.change(lambda data: data.setdefault('display', {}).update(values))
 
@@ -121,8 +154,19 @@ class Preferences:
         self.change(lambda data: data.update(collections=[c for c in data['collections'] if c['id'] != identifier]))
 
     def add_assets(self, identifier, assets):
+        """Add assets to a collection; each takes the user's current in/out points with it."""
         def add(data):
-            self.collection(identifier)['assets'].update({asset_key(a): reference(a) for a in assets})
+            entries = self.collection(identifier)['assets']
+            for asset in assets:
+                key = asset_key(asset)
+                entry = reference(asset)
+                trim = stored_trim(data.get('trims', {}).get(key))
+                if trim:
+                    entry.update(trim)
+                elif key in entries:
+                    # Already collected: keep the in/out points the entry has.
+                    entry.update({k: entries[key][k] for k in ('in', 'out') if k in entries[key]})
+                entries[key] = entry
         self.change(add)
 
     def remove_assets(self, identifier, keys):
@@ -134,14 +178,15 @@ class Preferences:
 
     def export_collection(self, identifier, path):
         collection = self.collection(identifier)
-        atomic_json(path, {'format': 'tinylib.collection', 'version': 1, 'name': collection['name'],
+        # Version 2 adds optional in/out points per asset.
+        atomic_json(path, {'format': 'tinylib.collection', 'version': 2, 'name': collection['name'],
                            'assets': list(collection['assets'].values())})
 
     def import_collection(self, path):
         if Path(path).stat().st_size > 16 * 1024 * 1024:
             raise ValueError('Collection JSON exceeds 16 MB.')
         data = read_json(path)
-        if (data.get('format') != 'tinylib.collection' or data.get('version') != 1
+        if (data.get('format') != 'tinylib.collection' or data.get('version') not in (1, 2)
                 or not isinstance(data.get('name'), str) or not data['name'].strip()
                 or not isinstance(data.get('assets'), list)):
             raise ValueError('Not a TinyLib collection JSON file.')
@@ -152,6 +197,11 @@ class Preferences:
             clean = reference(item)
             if any(not isinstance(value, str) for value in clean.values()):
                 raise ValueError('Asset reference fields must be text.')
+            if 'in' in item or 'out' in item:
+                trim = stored_trim((item.get('in'), item.get('out')))
+                if not trim:
+                    raise ValueError('Collection contains invalid in/out points for %s.' % item['name'])
+                clean.update(trim)
             refs[asset_key(clean)] = clean
         def create(current):
             name = data['name'].strip()

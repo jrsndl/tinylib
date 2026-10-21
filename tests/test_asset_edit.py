@@ -32,6 +32,22 @@ class AssetEditTests(unittest.TestCase):
         self.assertTrue(read_json(self.root / 'tinylib_data.json')['studio_extra'])
         self.assertEqual(read_json(self.root / 'tinylib_data.json')['assets'][0]['main'], self.record['main'])
 
+    def test_legacy_metadata_colorspace_is_dropped(self):
+        record = dict(self.record, id='fire/legacy', name='Legacy', main='fire/legacy/main/legacy.####.exr',
+                      metadata={'width': 1920, 'height': 1080, 'colorspace': 'ACES - ACEScg'})
+        record.pop('colorspace')
+        atomic_json(self.root / 'tinylib_data.json', {'schema_version': 3, 'assets': [self.record, record]})
+        assets = {asset['id']: asset for asset in Library(self.root, 'Test').load()}
+        self.assertNotIn('colorspace', assets['fire/test']['metadata'])
+        # An asset without its own field keeps the old metadata value as its color space.
+        self.assertEqual(assets['fire/legacy']['colorspace'], 'ACES - ACEScg')
+        self.assertNotIn('colorspace', assets['fire/legacy']['metadata'])
+        saved = save_asset(self.config, self.access, assets['fire/legacy'],
+                           {'metadata': dict(assets['fire/legacy']['metadata'], width=2048)})
+        self.assertNotIn('colorspace', saved['metadata'])
+        stored = read_json(self.root / 'tinylib_data.json')['assets'][1]
+        self.assertNotIn('colorspace', stored['metadata'])
+
     def test_stale_same_field_rejected_other_field_preserved(self):
         save_asset(self.config, self.access, self.asset, {'tags': ['new']})
         with self.assertRaises(ValueError):

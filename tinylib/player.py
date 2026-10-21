@@ -53,6 +53,7 @@ class Player(QtCore.QObject):
     started = QtCore.Signal()
     finished = QtCore.Signal()
     rating_requested = QtCore.Signal(object, int)
+    trim_requested = QtCore.Signal(object, object)  # asset, (in, out) or None
 
     def __init__(self, settings, parent=None):
         super().__init__(parent)
@@ -117,6 +118,7 @@ class Player(QtCore.QObject):
             self.windows.add(window)
             window.error.connect(self.error)
             window.rating_requested.connect(lambda rating, selected=asset: self.rating_requested.emit(selected, rating))
+            window.trim_requested.connect(lambda trim, selected=asset: self.trim_requested.emit(selected, trim))
             def closed():
                 self.windows.discard(window)
                 self.finished.emit()

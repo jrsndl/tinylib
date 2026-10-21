@@ -63,7 +63,14 @@
     "group": "none",
     "priority": 50,
     "worker_script": "",
-    "spool_root": ""
+    "spool_root": "",
+    "web_service": {
+      "url": "",
+      "require_authentication": false,
+      "verify_ssl": true,
+      "user": "",
+      "password": ""
+    }
   },
   "action_roots": [
     "{app}/actions"

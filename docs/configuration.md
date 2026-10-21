@@ -22,6 +22,7 @@ ffmpeg        = C:/tools/ffmpeg/ffmpeg.exe
 ffprobe       = C:/tools/ffmpeg/ffprobe.exe
 oiiotool      = C:/tools/oiio/oiiotool.exe
 vfx_transcode = C:/tools/vfx-transcode/vfx-transcode.exe
+ocio          = //studio/pipeline/ocio/aces_1.2/config.ocio
 ```
 
 | Key | Type | Default | Meaning |
@@ -42,7 +43,7 @@ vfx_transcode = C:/tools/vfx-transcode/vfx-transcode.exe
 | `TINYLIB_CONFIG` | Browser configuration to use when no explicit path is given. Overrides `config` in `tinylib.ini`. Never affects the security file. |
 | `TINYLIB_USER_PREFS` | Path of the personal preferences file. Default `%APPDATA%/TinyLib/preferences.json`, or `~/.config/TinyLib/preferences.json` when `APPDATA` is not set. |
 | `NUKE_TEMP_DIR` | Preferred parent of the local cache and log folder (`<NUKE_TEMP_DIR>/tinylib`). See [local thumbnail cache](deployment.md#local-thumbnail-cache). |
-| `OCIO` | Not read by TinyLib directly; the public profiles use `"${OCIO}"` as their `ocio_config`. |
+| `OCIO` | Not read by TinyLib directly; the public profiles use `"${OCIO}"` as their `ocio_config`. A farm worker without it needs `ocio` under `[tools]` in `tinylib.ini`. |
 
 ## Browser configuration
 
@@ -63,7 +64,7 @@ If a sibling file with `.local` before the extension exists (for example `studio
 | `tools.*` | inside the install folder | beside the configuration | as written: a bare name such as `ffmpeg` is found on PATH | as written |
 | `action_roots[]` | inside the install folder | beside the configuration | beside the configuration | as written |
 
-`{app}` is the TinyLib install folder, the one containing `menu.py` and the `tinylib` package. Write it at the start of the value: `"{app}/actions"`, `"{app}/executables/ffmpeg/ffmpeg.exe"`. Other path values (`ocio_config`, Deadline paths) are used as written.
+`{app}` is the TinyLib install folder, the one containing `menu.py` and the `tinylib` package. Write it at the start of the value: `"{app}/actions"`, `"{app}/executables/ffmpeg/ffmpeg.exe"`. Other path values (`ocio_config`, Deadline paths) are used as written; an environment variable that is not set stays as written, e.g. `${OCIO}`.
 
 ### Validation
 
@@ -89,7 +90,7 @@ Loading also fails when `extension_groups` is not an object, names an unknown gr
 | `action_roots` | list of folder paths | `["{app}/actions"]` | Folders of action packages; see [action packages](actions-and-access.md#action-packages). |
 | `tile_template` | string | `{name}\n{type} · {width} × {height}` | Initial tile caption template. A user's own **Tile text…** setting wins. An invalid template falls back to the default. Tokens are listed in the [user guide](user-guide.md#tile-text). |
 | `player_backend` | `"interactive"` or `"ffplay"` | `"interactive"` | `"ffplay"` launches the external ffplay player instead of the built-in review player. Any other value means interactive. |
-| `library_defaults` | object | `{}` | Starting entry for **Create New Library…** with "Studio defaults", for example `{"read_only": false, "legacy_roots": []}`. Copied as written; name and root come from the dialog. |
+| `library_defaults` | object | `{}` | Starting entry for **Create new library…** with "Studio defaults", for example `{"read_only": false, "legacy_roots": []}`. Copied as written; name and root come from the dialog. |
 | `access` | object | | Ignored, unless this file is also the security file. |
 | `security_config` | | | Ignored. The security file is chosen only by `tinylib.ini`. |
 
@@ -106,7 +107,7 @@ TinyLib adds keys starting with `_`, plus `asset_type_schema_version`, when it l
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `name` | string | required | Display name. Must be unique for **Create New Library…**. |
+| `name` | string | required | Display name. Must be unique for **Create new library…**. |
 | `root` | path | required | Folder containing `tinylib_data.json` and the `category/asset` folders. |
 | `read_only` | boolean | `false` | Excludes the library from ingest destinations and editing, for everyone. `read_only` in the security file has the same effect; either one is enough. |
 | `legacy_roots` | list of paths | `[]` | Absolute root prefixes stored in an old database. A stored path starting with one of them (case-insensitive, `\` or `/`) is remapped onto `root`. |
@@ -125,10 +126,11 @@ Set tools in the `[tools]` section of [`tinylib.ini`](#tinylibini). Because that
 | Key | Default | Used for |
 | --- | --- | --- |
 | `ffmpeg` | `ffmpeg` | Generating proxies, thumbnails and filmstrips; decoding in the review player. |
-| `ffprobe` | `ffprobe` | Probing containers (ingest, Rescan Metadata) and checking generated media. The player uses `ffprobe` beside `ffmpeg` when this key is not set. |
+| `ffprobe` | `ffprobe` | Probing containers (ingest, Rescan metadata) and checking generated media. The player uses `ffprobe` beside `ffmpeg` when this key is not set. |
 | `oiiotool` | `oiiotool` | Color conversion of image files; probing images and sequences. |
-| `vfx_transcode` | `vfx-transcode` | Image-sequence proxies for profiles with `"proxy_backend": "vfx_transcode"`. |
+| `vfx_transcode` | `vfx-transcode` | Image-sequence proxies, thumbnails and filmstrips for profiles with `"proxy_backend": "vfx_transcode"`. Needs version 2026.09 or newer. |
 | `ffplay` | `ffplay` beside `ffmpeg`, else `ffplay` on PATH | Only with `"player_backend": "ffplay"`. |
+| `ocio` | the profile's `ocio_config` | OCIO config file for every processing profile on this machine; overrides `ocio_config`. A path, or a built-in config such as `ocio://studio-config-latest` (OCIO 2.2+). Set it on farm workers that have no `OCIO` environment variable. |
 
 The farm worker uses the tools from **its own** `tinylib.ini` (and configuration), never from the job manifest. External tools time out: probes after 60 seconds, each conversion step after one hour.
 
@@ -149,11 +151,12 @@ The ingest form lists profiles by name. The worker looks the same name up in its
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `ocio_config` | path | none | OCIO config file. Must exist on the worker whenever previews are generated from image files (stills and image sequences), and for `proxy_backend` `vfx_transcode`. Footage containers are converted with FFmpeg and do not use it. |
+| `ocio_config` | path | none | OCIO config file. `ocio` under `[tools]` in `tinylib.ini` overrides it. Must exist on the worker whenever previews are generated from image files (stills and image sequences), and for `proxy_backend` `vfx_transcode`, which also accepts a built-in config such as `ocio://studio-config-latest`. Footage containers are converted with FFmpeg and do not use it. |
 | `output_colorspace` | string | `Output - Rec.709` | OCIO display color space of generated previews. |
 | `color_args` | list of strings | `["--colorconvert", "{input_colorspace}", "{output_colorspace}"]` | oiiotool arguments for the color conversion. `{input_colorspace}` is the main color space chosen at ingest; `{output_colorspace}` is `output_colorspace`. An empty list is an error. |
 | `thumbnail_frame` | `"largest"` or `"middle"` | `"largest"` | Frame used for a generated thumbnail: the largest source file, or the middle frame. |
-| `proxy_backend` | `"vfx_transcode"` | built-in | `"vfx_transcode"` makes image-sequence footage proxies with `tools.vfx_transcode`. Otherwise frames are converted with oiiotool and encoded with FFmpeg. |
+| `proxy_backend` | `"vfx_transcode"` | built-in | `"vfx_transcode"` makes the generated previews of image-sequence footage with one `tools.vfx_transcode` run: the proxy, and the thumbnail and filmstrip unless they are taken from the proxy (`preview_source` `proxy`). The frames are converted once, in the worker's local temp folder. Anamorphic footage is made square-pixel. A frame that fails to convert fails the ingest. Footage containers and stills keep the built-in path. |
+| `display`, `view`, `looks` | strings | not used | `vfx_transcode` only: convert with an OCIO display/view (ACES 1.3+ configs) instead of `output_colorspace`. `""` means the config's default. |
 | `description` | string | | Informational only; TinyLib does not display or use it. |
 
 ### deadline
@@ -167,8 +170,44 @@ The ingest form lists profiles by name. The worker looks the same name up in its
 | `group` | string | `none` | Deadline group. |
 | `priority` | integer | `50` | Job priority. |
 | `python_version` | string | `3.10` | Version for the Deadline Python plugin. |
+| `web_service` | object | not used | Submit through the Deadline Web Service instead of `command`; see below. |
 
 Values containing a line break or a double quote are rejected. See [Deadline 10.4](deployment.md#deadline-104).
+
+#### web_service
+
+```json
+"web_service": {
+  "url": "http://192.168.100.20:8081",
+  "require_authentication": false,
+  "verify_ssl": false,
+  "user": "",
+  "password": "${DEADLINE_WEB_PASSWORD}"
+}
+```
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `url` | string | empty | Web Service address, `http://host:port` or `https://host:port`. Empty turns the Web Service off. |
+| `require_authentication` | boolean | `false` | Send `user` and `password` with HTTP basic authentication. Turn on when the Web Service requires authentication. |
+| `verify_ssl` | boolean | `true` | `false` accepts any certificate on an `https` URL (self-signed). No effect on `http`. |
+| `user` | string | the workstation login | Deadline user name. Used for authentication and as the job's user. |
+| `password` | string | empty | Web Service password for `user`. |
+
+With `url` set, every submission tries the Web Service first: no `deadlinecommand` process starts, and each job is confirmed by the job ID the Web Service returns. TinyLib falls back to `command` whenever the Web Service certainly did not create the job:
+
+- `url` is not an `http://` or `https://` address;
+- no connection within 3 seconds (not running, wrong address, firewall);
+- the request could not be sent;
+- the Web Service answered with an error, e.g. 401 for refused credentials or 500 when it cannot reach the repository.
+
+In a folder batch, jobs the Web Service already confirmed stay submitted and only the remaining ones go to `deadlinecommand`. The progress window and the log say why the Web Service was skipped.
+
+TinyLib does not fall back when the request was sent but the answer was lost (no answer within 30 seconds, or the connection dropped), or the answer had no job ID, because the job may exist then. Check Monitor before retrying.
+
+Without the Web Service, a folder batch is submitted with one `deadlinecommand -SubmitMultipleJobs` call, so Deadline starts and connects to the repository once for the whole batch.
+
+The browser configuration is readable by every artist. Do not write the password into it; reference an environment variable set on workstations, e.g. `"${DEADLINE_WEB_PASSWORD}"`.
 
 ## Security file
 

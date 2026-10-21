@@ -58,7 +58,9 @@ class MetadataScanTests(unittest.TestCase):
     def test_oiiotool_probe_parses_required_fields(self):
         xml = '<ImageSpec><width>10</width><height>5</height><attrib name="oiio:ColorSpace" type="string">sRGB</attrib></ImageSpec>'
         with patch('tinylib.metadata_scan._run', return_value=xml):
-            self.assertEqual(probe_image('still.jpg', 'oiiotool')['colorspace'], 'sRGB')
+            scanned = probe_image('still.jpg', 'oiiotool')
+        self.assertEqual((scanned['width'], scanned['height']), (10, 5))
+        self.assertNotIn('colorspace', scanned)  # The asset's color space is chosen at ingest.
 
 
 if __name__ == '__main__':

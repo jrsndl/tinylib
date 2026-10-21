@@ -21,6 +21,9 @@ ffprobe = ffprobe
 ffplay = ffplay
 oiiotool = oiiotool
 vfx_transcode = vfx-transcode
+# OCIO config for generated previews; overrides each profile's "ocio_config".
+# A path, or a built-in config such as ocio://studio-config-latest.
+# ocio = //studio/pipeline/ocio/aces_1.2/config.ocio
 
 # Local development: use the repository's own configuration as the security file,
 # then run:  python -m tinylib.admin add-user <your account>

@@ -24,6 +24,15 @@ def interface_font():
     return QtGui.QFont(UI_FONT_FAMILY, UI_FONT_SIZE)
 
 
+ICONS = Path(__file__).resolve().with_name('icons')
+
+
+def stylesheet(hosted_in_nuke):
+    """The application stylesheet with icon paths filled in (Qt needs absolute paths)."""
+    text = STYLE if hosted_in_nuke else Path(__file__).with_name('standalone.qss').read_text(encoding='utf-8')
+    return text.replace('@ICONS@', ICONS.as_posix())
+
+
 def heading_font():
     return QtGui.QFont(UI_FONT_FAMILY, HEADING_FONT_SIZE, QtGui.QFont.DemiBold)
 
@@ -33,9 +42,19 @@ QWidget { background: #282828; color: #d4d4d4; }
 QLabel#heading { color: #eeeeee; }
 QLabel#muted { color: #969696; }
 QLineEdit, QComboBox, QDoubleSpinBox, QPlainTextEdit { background: #202020; border: 1px solid #444; border-radius: 4px; padding: 4px 7px; selection-background-color: #80623c; }
+QComboBox { background: #383838; border-color: #4b4b4b; padding: 7px 32px 7px 10px; min-height: 18px; }
+QComboBox:hover { background: #474747; border-color: #777; }
+QComboBox:disabled { color: #737373; background: #2b2b2b; }
+QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: center right; width: 24px; border: 0; border-left: 1px solid #4b4b4b; }
+QComboBox::down-arrow { image: url("@ICONS@/arrow_down.png"); width: 10px; height: 6px; }
+QComboBox::down-arrow:disabled { image: url("@ICONS@/arrow_down_disabled.png"); }
+QComboBox QAbstractItemView { background: #202020; border: 1px solid #4b4b4b; selection-background-color: #80623c; }
+QToolButton { background: #383838; border: 1px solid #4b4b4b; border-radius: 4px; padding: 7px 30px 7px 12px; min-height: 18px; }
+QToolButton:hover { background: #474747; border-color: #777; }
+QToolButton::menu-indicator { image: url("@ICONS@/arrow_down.png"); width: 10px; height: 6px; subcontrol-origin: padding; subcontrol-position: center right; right: 10px; }
 QLineEdit { min-height: 20px; }
 QLineEdit:focus, QComboBox:focus { border-color: #bf8d4d; }
-QPushButton { background: #383838; border: 1px solid #4b4b4b; border-radius: 4px; padding: 7px 12px; }
+QPushButton { background: #383838; border: 1px solid #4b4b4b; border-radius: 4px; padding: 7px 12px; min-height: 18px; }
 QPushButton:hover { background: #474747; border-color: #777; }
 QPushButton:disabled { color: #737373; background: #2b2b2b; }
 QPushButton#primary { background: #a7783e; color: #fff; border: 1px solid #c49a67; }
@@ -50,6 +69,13 @@ QScrollBar:vertical { background: #242424; width: 10px; }
 QScrollBar::handle:vertical { background: #555; min-height: 24px; border-radius: 4px; }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 QToolTip { background: #383838; color: #eee; border: 1px solid #777; }
+QWidget#browser, QSplitter#panels, QSplitter#panels::handle { background: #191919; }
+QWidget#panel { background: #282828; border: 1px solid #3f3f3f; border-radius: 4px; }
+QWidget#browser > QLabel#muted { background: transparent; padding-left: 4px; }
+QTreeWidget#categories { border: 0; }
+QDoubleSpinBox#filterValue { padding: 7px 8px; min-height: 18px; }
+QLineEdit#search { padding: 7px 10px; min-height: 18px; }
+QTreeWidget#categories QHeaderView::section { border: 0; border-bottom: 1px solid #3f3f3f; }
 '''
 
 
@@ -262,6 +288,7 @@ class AssetModel(QtCore.QAbstractTableModel):
         self.assets = []
         self.collection_origin = None
         self.path_notation = 'nuke'
+        self.trim_for = None  # asset -> (in, out) for dragged paths, set by the owner.
         self.revision = 0
 
     def rowCount(self, parent=QtCore.QModelIndex()):
@@ -311,7 +338,7 @@ class AssetModel(QtCore.QAbstractTableModel):
         if self.collection_origin:
             origin = dict(self.collection_origin, keys=[self.assets[row].get('_collection_key') or asset_key(self.assets[row]) for row in rows])
             data.setData(COLLECTION_MIME, json.dumps(origin).encode('utf-8'))
-        data.setText(format_assets([self.assets[row] for row in rows], self.path_notation))
+        data.setText(format_assets([self.assets[row] for row in rows], self.path_notation, self.trim_for))
         return data
 
     def supportedDragActions(self):
@@ -348,13 +375,14 @@ class Cards(QtWidgets.QStyledItemDelegate):
 
     def paint(self, painter, option, index):
         asset = index.data(QtCore.Qt.UserRole)
-        rect = option.rect.adjusted(5, 5, -5, -5)
+        # 3 px inset plus 1 px item spacing on each side: 8 px between neighbouring tiles.
+        rect = option.rect.adjusted(3, 3, -3, -3)
         selected = bool(option.state & QtWidgets.QStyle.State_Selected)
         painter.save()
-        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        # Square-cornered card, drawn without antialiasing so its 1 px outline stays crisp.
         painter.setPen(QtGui.QColor('#bf945f' if selected else '#3b3b3b'))
         painter.setBrush(QtGui.QColor('#39342d' if selected else '#2c2c2c'))
-        painter.drawRoundedRect(rect, 5, 5)
+        painter.drawRect(rect.adjusted(0, 0, -1, -1))
         image_rect = QtCore.QRect(rect.x()+1, rect.y()+1, rect.width()-2, int(self.width*.5625)-12)
         painter.fillRect(image_rect, QtGui.QColor('#181818'))
         pixmap = self.pixmap(asset, index.row())
@@ -366,7 +394,7 @@ class Cards(QtWidgets.QStyledItemDelegate):
         else:
             painter.setPen(QtGui.QColor('#707070'))
             loading = any(asset.get(role) in self.cache.pending for role in ('thumb', 'filmstrip'))
-            painter.drawText(image_rect, QtCore.Qt.AlignCenter, 'Loading preview...' if loading else 'Preview unavailable')
+            painter.drawText(image_rect, QtCore.Qt.AlignCenter, 'Loading preview…' if loading else 'Preview unavailable')
         if self.info:
             metrics = painter.fontMetrics()
             lines = render_template(self.template, asset).split('\n') if self.template else []
@@ -374,6 +402,7 @@ class Cards(QtWidgets.QStyledItemDelegate):
                 painter.setPen(QtGui.QColor('#ececec' if line == 0 else '#a6a6a6'))
                 painter.drawText(rect.x()+10, image_rect.bottom()+21*(line+1), metrics.elidedText(text, QtCore.Qt.ElideRight, rect.width()-20))
             rating = max(0, min(5, int(asset.get('_rating', 0))))
+            painter.setRenderHint(QtGui.QPainter.Antialiasing)  # Smooth stars only.
             painter.setPen(QtGui.QPen(QtGui.QColor('#969696'), 1.2))
             for star in range(5):
                 painter.setBrush(QtGui.QColor('#a6a6a6') if star < rating else QtCore.Qt.NoBrush)
@@ -439,7 +468,8 @@ class Grid(QtWidgets.QListView):
         self.setLayoutMode(QtWidgets.QListView.Batched)
         self.setBatchSize(80)
         self.setUniformItemSizes(True)
-        self.setSpacing(3)
+        self.setSpacing(1)
+        self.setFrameShape(QtWidgets.QFrame.NoFrame)  # The panel already frames the view.
         self.setMouseTracking(True)
         self.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.setDragEnabled(True)
@@ -510,6 +540,17 @@ class Grid(QtWidgets.QListView):
         super().resizeEvent(event)
         if self.list_mode:
             self.scheduleDelayedItemsLayout()
+
+    def updateGeometries(self):
+        super().updateGeometries()
+        # Icon mode scrolls per pixel with a tiny step, so a wheel notch moved only a few
+        # pixels. One notch (normally three steps) now moves one row of tiles.
+        if self.list_mode or self.model() is None or not self.model().rowCount():
+            return
+        row = self.sizeHintForIndex(self.model().index(0, 0)).height() + 2 * self.spacing()
+        if row > 0:
+            lines = max(1, QtWidgets.QApplication.wheelScrollLines())
+            self.verticalScrollBar().setSingleStep(max(20, row // lines))
 
     def mouseMoveEvent(self, event):
         if self.list_mode:

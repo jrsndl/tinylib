@@ -21,7 +21,7 @@ build-backend = "setuptools.build_meta"
 packages = ["tinylib"]
 
 [tool.setuptools.package-data]
-tinylib = ["*.qss"]
+tinylib = ["*.qss", "icons/*.png"]
 
 [tool.ruff]
 line-length = 130

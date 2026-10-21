@@ -14,8 +14,9 @@ optionally the default browser configuration::
     oiiotool = oiiotool
 
 ``[tools]`` names the executables TinyLib runs (ffmpeg, ffprobe, ffplay, oiiotool,
-vfx_transcode). They override any ``tools`` in a browser configuration, and the
-farm worker uses them too, so only administrators decide which programs run.
+vfx_transcode) and the OCIO config (``ocio``). They override any ``tools`` in a
+browser configuration, and the farm worker uses them too, so only administrators
+decide which programs run.
 
 The security location is deliberately read only from this file. Environment
 variables, command-line options, ``*.local.json`` overrides and the
@@ -71,8 +72,13 @@ def read_install(path=None):
 
 
 def tool_path(base, value):
-    """A bare name ("ffmpeg") is found on PATH; a relative path resolves beside tinylib.ini."""
+    """A bare name ("ffmpeg") is found on PATH; a relative path resolves beside tinylib.ini.
+
+    OCIO built-in config URIs (``ocio://studio-config-latest``) are kept as written.
+    """
     value = value.strip().strip('"')
+    if value.startswith('ocio://'):
+        return value
     if '/' not in value and '\\' not in value:
         return value
     if Path(value).is_absolute() or value.startswith(('//', '\\\\')) or re.match(r'^[A-Za-z]:[\\/]', value):

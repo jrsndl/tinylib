@@ -6,7 +6,8 @@ from pathlib import Path
 from .qt import QtCore, QtWidgets, exec_dialog
 from .views import heading_font
 from .ingest import (clean_asset_name, keywords_from_name, make_manifest,
-                     prepare_source, save_manifest, submit_deadline, make_folder_manifests)
+                     prepare_source, save_manifest, submit_deadline, submit_deadline_batch,
+                     make_folder_manifests)
 from .asset_types import ASSET_TYPES, default_metadata
 from .metadata_scan import scan_source_metadata
 from .access import root_key
@@ -71,7 +72,7 @@ class Submission(QtCore.QThread):
     def run(self):
         confirmed = []
         try:
-            self.progress.emit('Validating ingest inputs and sequence frames...')
+            self.progress.emit('Validating ingest inputs and sequence frames…')
             if not self.batch:
                 manifest = make_manifest(*self.arguments)
                 self.done.emit(submit_deadline(manifest, self.settings, progress=self.progress.emit))
@@ -79,13 +80,11 @@ class Submission(QtCore.QThread):
             args = self.arguments
             manifests = make_folder_manifests(self.settings, args[1], args[3], args[4], args[6], args[7],
                                                args[11], self.progress.emit)
-            for index, manifest in enumerate(manifests, 1):
-                def report(message, index=index, name=manifest['name']):
-                    self.progress.emit('Job %d/%d - %s: %s' % (index, len(manifests), name, message))
-                result = submit_deadline(manifest, self.settings, progress=report)
-                item = {'name': manifest['name'], 'job_id': result[0], 'manifest': str(result[1])}
+            def submitted(manifest, identifier, path):
+                item = {'name': manifest['name'], 'job_id': identifier, 'manifest': str(path)}
                 confirmed.append(item)
                 self.item_submitted.emit(item)
+            submit_deadline_batch(manifests, self.settings, progress=self.progress.emit, submitted=submitted)
             self.done.emit({'jobs': confirmed})
         except Exception as error:
             if self.batch:
@@ -111,7 +110,7 @@ class SubmissionWindow(QtWidgets.QDialog):
         self.setModal(False)
         self.resize(540, 180)
         layout = QtWidgets.QVBoxLayout(self)
-        self.status = QtWidgets.QLabel('Preparing submission...')
+        self.status = QtWidgets.QLabel('Preparing submission…')
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
         layout.addWidget(QtWidgets.QLabel('Continue preparing the next asset in the open ingest form.'))
@@ -448,7 +447,7 @@ class IngestDialog(QtWidgets.QDialog):
             self.category.setCurrentText(preferred)
         self._category_initial = self.category.currentText()
         self._category_preferred = preferred
-        self.category.setToolTip('Discovering additional library folders...')
+        self.category.setToolTip('Discovering additional library folders…')
         self.category_scan.start(library['root'], self._category_request)
 
     def categories_loaded(self, result):
@@ -546,7 +545,7 @@ class IngestDialog(QtWidgets.QDialog):
         version = self._scan_versions[role]
         if role == 'main':
             self._main_scan_pending = True
-            self.status.setText('Scanning main footage metadata...')
+            self.status.setText('Scanning main footage metadata…')
         worker = MetadataScan(source, self.settings, self)
         self._scans.append(worker)
         worker.done.connect(lambda result: self.scan_finished(role, version, result))
@@ -644,7 +643,7 @@ class IngestDialog(QtWidgets.QDialog):
     def in_background(self, work, done, message):
         """Run network-heavy work (folder discovery, probing every source) off the GUI thread."""
         if any(task.isRunning() for task in self._background):
-            return self.error('Still preparing the previous request...')
+            return self.error('Still preparing the previous request…')
         task = Background(work, self)
         self._background.append(task)
 
@@ -670,7 +669,7 @@ class IngestDialog(QtWidgets.QDialog):
             args, batch = worker_arguments(self.manifest_arguments()), bool(self._batch_folder)
         except Exception as error:
             return self.error(str(error))
-        self.in_background(lambda: build_manifest(args, batch), self.show_review, 'Preparing job manifest(s)...')
+        self.in_background(lambda: build_manifest(args, batch), self.show_review, 'Preparing job manifest(s)…')
 
     def show_review(self, job):
         try:
@@ -695,7 +694,7 @@ class IngestDialog(QtWidgets.QDialog):
         folder = QtWidgets.QFileDialog.getExistingDirectory(self, 'Save manifest folder')
         if folder:
             self.in_background(lambda: build_manifest(args, batch), lambda job: self.save_manifests(job, folder),
-                               'Preparing job manifest(s)...')
+                               'Preparing job manifest(s)…')
 
     def save_manifests(self, job, folder):
         try:

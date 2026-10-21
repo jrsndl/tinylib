@@ -1,7 +1,9 @@
 """Farm worker. All outputs are staged and verified before library publication."""
 import json
+import re
 import shutil
 import subprocess
+import uuid
 from fractions import Fraction
 from pathlib import Path
 from .library import Library, atomic_json, read_json, safe_component, sequence_files, split_sequence
@@ -58,11 +60,19 @@ class Processor:
         self.ffmpeg = self.tools.get('ffmpeg', 'ffmpeg')
         self.cache = {}
 
+    def ocio_config(self):
+        """The worker's OCIO config: ``ocio`` in tinylib.ini [tools], else the profile's ``ocio_config``."""
+        ocio = str(self.tools.get('ocio') or self.profile.get('ocio_config') or '')
+        if ocio.startswith('ocio://') or (ocio and Path(ocio).is_file()):
+            return ocio
+        if not ocio or re.search(r'\$\{?\w+\}?|%\w+%', ocio):
+            raise ValueError('No OCIO config on this worker (%s). Set "ocio" under [tools] in tinylib.ini, '
+                             'or set the environment variable it names.' % (ocio or 'not set'))
+        raise ValueError('OCIO config is unavailable: ' + ocio)
+
     def image(self, source, target, size, convert=True):
         if convert:
-            ocio = self.profile.get('ocio_config', '')
-            if not ocio or not Path(ocio).is_file():
-                raise ValueError('Processing profile requires an accessible OCIO configuration: ' + ocio)
+            ocio = self.ocio_config()
             values = dict(input_colorspace=self.job['colorspace'],
                           output_colorspace=self.profile.get('output_colorspace', 'Output - Rec.709'))
             color_args = self.profile.get('color_args', ['--colorconvert', '{input_colorspace}', '{output_colorspace}'])
@@ -86,6 +96,66 @@ class Processor:
         if not Path(target).is_file():
             raise ValueError('Proxy does not contain requested frame %d' % index)
 
+    def vfx_transcode(self, sources, outputs):
+        """Generate an image sequence's proxy, thumbnail and filmstrip in one vfx-transcode run.
+
+        One run converts the frames once (OCIO, resize) and reuses them for all three.
+        Previews taken from the proxy (preview_source 'proxy') are left to the built-in
+        code, which reads them from the proxy file. Returns the output keys it made.
+        """
+        job, media = self.job, self.job['media']
+        from_main = job['preview_source'] != 'proxy'
+        wanted = [key for key in ('proxy', 'thumb', 'filmstrip')
+                  if outputs.get(key) and media[key]['mode'] == 'generate' and (key == 'proxy' or from_main)]
+        if not wanted:
+            return set()
+        ocio = self.ocio_config()
+        rate = Fraction(str(job['fps'])).limit_denominator(1001)
+        ntsc = Fraction(round(rate * Fraction(1001, 1000)) * 1000, 1001)
+        if rate.denominator != 1 and abs(rate - ntsc) < Fraction(1, 100):
+            rate = ntsc  # 23.976 is 24000/1001; vfx-transcode uses a typed fraction exactly.
+        rate = str(rate.numerator) if rate.denominator == 1 else '%s/%s' % (rate.numerator, rate.denominator)
+        args = [self.tools.get('vfx_transcode', 'vfx-transcode'), '-i', sources[0],
+                # The ingest FPS is authoritative; validate_media compares the proxy against it.
+                '-r', rate, '-fps_source', 'arg_only', '-ci', job['colorspace'], '-ocio', ocio,
+                '-oiio', self.tools.get('oiiotool', 'oiiotool'), '-ffmpeg', self.ffmpeg,
+                '-ffprobe', self.tools.get('ffprobe', 'ffprobe'),
+                # Library previews are clean pictures: no studio defaults from the presets file.
+                '-burn_preset', 'none', '-slate', 'none', '-metadata_preset', 'none',
+                '-oiio_transform', 'none', '-smart_tokens', 'none',
+                '-par_out', 'square', '-alpha', 'drop', '-temp_location', 'user',
+                '-mezzanine', 'jpg', '-width', '1920']
+        display, view = self.profile.get('display'), self.profile.get('view')
+        if display is not None or view is not None:
+            args += ['-display', display or '', '-view', view or '']
+            if self.profile.get('looks'):
+                args += ['-looks', self.profile['looks']]
+        else:
+            args += ['-co', self.profile.get('output_colorspace', 'Output - Rec.709')]
+        if 'proxy' in wanted:
+            args += ['-ff_filter', fit_filter(1920, 1080),
+                     # -ff_encode replaces the preset and adds no colour tags, so they are given here.
+                     '-ff_encode', '-pix_fmt yuv420p {videofilter} -c:v libx264 -crf 23 -preset faster '
+                                   '-movflags +faststart -color_primaries bt709 -color_trc bt709 -colorspace bt709',
+                     '-o', outputs['proxy']]
+        thumb = self.work / 'vfx_thumb'
+        if 'thumb' in wanted:
+            frame = 'largest' if self.profile.get('thumbnail_frame', 'largest') == 'largest' else 'middle'
+            args += ['-ot', thumb, '-thumbnail_frame', frame]
+        if 'filmstrip' in wanted:
+            args += ['-of', outputs['filmstrip'], '-filmstrip_tiles', '24', '-filmstrip_tile', '480x270',
+                     '-filmstrip_grid', '24x1', '-filmstrip_quality', '90', '-filmstrip_slate', '0',
+                     '-filmstrip_source', 'intermediates' if 'proxy' in wanted else 'source']
+        # Exit code 2 (frames replaced by neighbours) fails the ingest like any other error.
+        run(args)
+        if 'thumb' in wanted:
+            made = sorted(self.work.glob('vfx_thumb.*'))
+            if not made:
+                raise ValueError('vfx-transcode did not write a thumbnail.')
+            # vfx-transcode resizes thumbnails by width; the library needs the padded 960x506 canvas.
+            self.image(made[0], outputs['thumb'], (960, 506), convert=False)
+        return set(wanted)
+
     def generate(self, sources, outputs):
         job = self.job
         media = job['media']
@@ -94,25 +164,15 @@ class Processor:
         containers = {'.' + item for item in groups.get('extensions_footage_containers', [])}
         container = footage and len(sources) == 1 and sources[0].suffix.lower() in containers
         proxy = outputs.get('proxy')
-        if proxy and media['proxy']['mode'] == 'generate':
+        made = set()
+        if footage and not container and self.profile.get('proxy_backend') == 'vfx_transcode':
+            made = self.vfx_transcode(sources, outputs)
+        if proxy and media['proxy']['mode'] == 'generate' and 'proxy' not in made:
             if container:
                 run([self.ffmpeg, '-y', '-v', 'error', '-i', sources[0], '-vf', fit_filter(1920, 1080),
                      '-c:v', 'libx264', '-crf', '23', '-preset', 'faster', '-pix_fmt', 'yuv420p',
                      '-movflags', '+faststart', '-color_primaries', 'bt709', '-color_trc', 'bt709',
                      '-colorspace', 'bt709', proxy])
-            elif footage and self.profile.get('proxy_backend') == 'vfx_transcode':
-                ocio = self.profile.get('ocio_config', '')
-                if not Path(ocio).is_file():
-                    raise ValueError('OCIO config is unavailable: ' + ocio)
-                rate = Fraction(str(job['fps'])).limit_denominator(1001)
-                rate = str(rate.numerator) if rate.denominator == 1 else '%s/%s' % (rate.numerator, rate.denominator)
-                run([self.tools.get('vfx_transcode', 'vfx-transcode'), '-i', sources[0], '-r', rate,
-                     '-ci', job['colorspace'], '-co', self.profile.get('output_colorspace', 'Output - Rec.709'),
-                     '-ocio', ocio, '-oiio', self.tools.get('oiiotool', 'oiiotool'), '-ffmpeg', self.ffmpeg,
-                     '-width', '1920', '-mezzanine', 'jpg', '-temp', '_vfx_temp',
-                     '-ff_filter', fit_filter(1920, 1080),
-                     '-ff_encode', '-c:v libx264 -crf 23 -pix_fmt yuv420p -movflags +faststart -color_primaries bt709 -color_trc bt709 -colorspace bt709',
-                     '-o', proxy])
             elif footage:
                 frames = self.work / 'proxy_frames'
                 frames.mkdir()
@@ -125,7 +185,7 @@ class Processor:
                      '-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709', proxy])
             else:
                 self.image(sources[0], proxy, (1920, 1080))
-        if outputs.get('thumb') and media['thumb']['mode'] == 'generate':
+        if outputs.get('thumb') and media['thumb']['mode'] == 'generate' and 'thumb' not in made:
             if self.profile.get('thumbnail_frame', 'largest') == 'largest':
                 chosen = max(range(len(sources)), key=lambda i: sources[i].stat().st_size)
             else:
@@ -136,7 +196,8 @@ class Processor:
                 self.image(sources[0], outputs['thumb'], (960, 506), convert=False)
             else:
                 self.image(sources[chosen], outputs['thumb'], (960, 506))
-        if footage and outputs.get('filmstrip') and media['filmstrip']['mode'] == 'generate':
+        if (footage and outputs.get('filmstrip') and media['filmstrip']['mode'] == 'generate'
+                and 'filmstrip' not in made):
             if container:
                 strip_source = proxy if job['preview_source'] == 'proxy' and proxy else sources[0]
                 info = probe(strip_source, self.tools)
@@ -217,6 +278,31 @@ def footage_timing(job, main_info, first, last):
     return frame_rate, frames, seconds
 
 
+def clear_failed_attempt(stage):
+    """Remove the staging folder an earlier, failed attempt of this job left behind.
+
+    Deadline requeues a failed or stalled task on any worker, so a retry must be
+    able to start over. The folder is first renamed aside: while another worker
+    still has files open in it, Windows refuses the rename and this attempt stops
+    instead of deleting files under it. Only this job's own folder inside
+    ``.tinylib-staging`` is touched.
+    """
+    if stage.parent.name != '.tinylib-staging' or stage.is_symlink() or not stage.is_dir():
+        raise ValueError('Unexpected staging path; inspect it before retrying: ' + str(stage))
+    aside = stage.with_name('%s.retry-%s' % (stage.name, uuid.uuid4().hex[:8]))
+    try:
+        stage.rename(aside)
+    except OSError as error:
+        raise RuntimeError('Staging of an earlier attempt is still in use, probably by another worker: '
+                           '%s (%s)' % (stage, error)) from error
+    log.warning('Removing staging left by an earlier attempt: %s', stage)
+    print('Removing staging left by an earlier attempt: %s' % stage, flush=True)
+    shutil.rmtree(aside, ignore_errors=True)
+    if aside.exists():
+        # Not fatal: the retry uses a fresh folder; an administrator can delete this later.
+        log.warning('Could not fully remove %s; delete it by hand.', aside)
+
+
 def process(manifest_path, access=None, settings=None):
     job = read_json(manifest_path)
     if job.get('manifest_version') != 1:
@@ -248,7 +334,7 @@ def process(manifest_path, access=None, settings=None):
     staging_parent.mkdir(exist_ok=True)
     stage = staging_parent / identifier
     if stage.exists():
-        raise ValueError('Staging exists from an earlier attempt; inspect it before retrying: ' + str(stage))
+        clear_failed_attempt(stage)
     stage.mkdir()
     work = stage / '_work'
     work.mkdir()
@@ -299,8 +385,7 @@ def process(manifest_path, access=None, settings=None):
         if job['kind'] in ('still', 'footage'):
             main_info = probe(main_dir / sources[0].name, job['tools'])
             metadata.update(width=int(main_info['width']), height=int(main_info['height']),
-                            pixel_aspect=pixel_aspect(main_info.get('sample_aspect_ratio', '1:1')),
-                            colorspace=job['colorspace'])
+                            pixel_aspect=pixel_aspect(main_info.get('sample_aspect_ratio', '1:1')))
             groups = extension_groups({'extension_groups': job.get('extension_groups', {})})
             metadata['is_raw'] = sources[0].suffix.lower().lstrip('.') in groups.get('extensions_stills_raw', [])
             if job['kind'] == 'footage':

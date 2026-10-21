@@ -77,7 +77,7 @@ TinyLib writes a rotating `tinylib-<user>.log` (1 MB, three backups) in the loca
 3. Make sure the Deadline Python plugin has the configured Python version (`deadline.python_version`, default 3.10). Set `pool`, `group` and `priority` as needed.
 4. Workers take tool paths from `[tools]` in **their own** `tinylib.ini`, and processing profiles from their own browser configuration (`config` in `tinylib.ini`, or `TINYLIB_CONFIG` on the worker), never from the job manifest. Set every tool and the OCIO config to paths that exist on the workers; if the farm and workstations need different tool paths, give the farm its own install folder with its own `tinylib.ini`.
 5. Give the worker account read access to source media and the spool, and write access to destination libraries. Do not make it an administrator; give it a `farm` group with view and ingest grants (see [security setup](security.md#farm)). Prefer UNC paths over mapped drives. This targets a Windows farm; cross-platform path mapping is not implemented.
-6. Use **Submit to Deadline** in the ingest form. One Python task copies main and highres, generates and validates the previews, and publishes the asset. The dialog shows the Deadline job ID and manifest location once Deadline confirms (within 60 seconds).
+6. Use **Submit to Deadline** in the ingest form. One Python task copies main and highres, generates and validates the previews, and publishes the asset. The dialog shows the Deadline job ID and manifest location once Deadline confirms (within 60 seconds). For faster submission, run the Deadline Web Service and set [`deadline.web_service`](configuration.md#web_service).
 
 Deadline Monitor shows processing output. Beside each manifest in the spool, `.submission.json` stores the Deadline job ID and `.status.json` records processing, completion or failure. Refresh the browser after a job completes; the browser does not poll Deadline.
 
@@ -87,7 +87,7 @@ Deadline Monitor shows processing output. Beside each manifest in the spool, `.s
 
 - It checks its own account's view and ingest grants for the destination library and refuses read-only libraries. It cannot verify which artist submitted the job, so `ingest_user` in a manifest is informational.
 - Files are staged in `<library>/.tinylib-staging/<job-id>`. Publication takes the library's exclusive write lock, rereads the database and appends the asset atomically (see [write locks](admin.md#write-locks)).
-- A failed job keeps its staging folder and is not registered. Inspect it, then remove only that job's staging folder before retrying. A completed manifest can be retried without creating a duplicate.
+- A failed job keeps its staging folder and is not registered. A retry, on any worker, deletes that folder and starts over, so Deadline can requeue failed tasks on other workers. A completed manifest can be retried without creating a duplicate.
 - Every external tool call has a timeout: probes 60 seconds, each conversion step one hour.
 - Set `OCIO`, or `ocio_config` in the processing profile, to an ACES configuration that contains the profile's color space names.
 

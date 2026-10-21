@@ -17,7 +17,7 @@ DEFAULT_EXTENSION_GROUPS = {
 }
 
 VISUAL_METADATA = {
-    'width': 'integer', 'height': 'integer', 'pixel_aspect': 'number', 'colorspace': 'text',
+    'width': 'integer', 'height': 'integer', 'pixel_aspect': 'number',
     'is_equirectangular': 'boolean', 'is_raw': 'boolean', 'timecode': 'text',
     'frame_rate': 'number', 'reelid': 'text', 'file_size_main': 'integer', 'file_size_total': 'integer',
 }

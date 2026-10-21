@@ -95,6 +95,7 @@ class InstallTests(unittest.TestCase):
                        'ffprobe = //studio/tools/ffprobe.exe\n'
                        'oiiotool = oiiotool\n'
                        'vfx_transcode = bin\\vfx-transcode.exe\n'
+                       'ocio = ocio://studio-config-latest\n'
                        'ffplay =\n')
         atomic_json(self.config, {'libraries': [], 'tools': {'ffmpeg': 'old-ffmpeg', 'ffplay': 'config-ffplay'}})
         tools = load_settings(self.config, install=self.ini)['tools']
@@ -103,6 +104,7 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(tools['oiiotool'], 'oiiotool')  # Bare name: found on PATH.
         self.assertEqual(Path(tools['vfx_transcode']), (self.root / 'bin' / 'vfx-transcode.exe').resolve())
         self.assertEqual(tools['ffplay'], 'config-ffplay')  # Empty in the ini: the config value stays.
+        self.assertEqual(tools['ocio'], 'ocio://studio-config-latest')  # OCIO URIs are kept as written.
 
     def test_ini_tools_reach_the_farm_worker(self):
         from tinylib.processing import apply_worker_settings

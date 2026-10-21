@@ -1,6 +1,7 @@
 """Studio browser: library tree, filters, multi-selection and collections."""
 from pathlib import Path
 import math
+import re
 import json
 import threading
 import time
@@ -9,7 +10,7 @@ from .settings import load_settings
 from .preferences import Preferences, asset_key, COLLECTION_MIME
 from .filters import accepts
 from .collection_ui import CollectionsPanel
-from .views import (STYLE, Loader, ImageCache, AssetModel, Grid, DetailsView,
+from .views import (stylesheet, Loader, ImageCache, AssetModel, Grid, DetailsView,
                     heading_font, interface_font)
 from .access import AccessControl, root_key
 from .access_ui import AccessDialog
@@ -26,6 +27,7 @@ from .asset_types import ASSET_TYPES
 from .library import Library
 from .thumbnail_cache import prune_cache
 from .log import configure as configure_logging, log_path
+from .library_tools import require_admin
 from .library_tools_ui import CrosscheckDialog, MetadataRescanDialog, LibrarySortDialog, CreateLibraryDialog
 
 
@@ -60,8 +62,9 @@ class StarButton(QtWidgets.QPushButton):
 class NumericFilter(QtWidgets.QWidget):
     changed = QtCore.Signal()
 
-    def __init__(self, label, maximum, decimals=0, parent=None):
+    def __init__(self, label, maximum, decimals=0, parent=None, tooltip='', width=80):
         super().__init__(parent)
+        self.setToolTip(tooltip)  # Carries the unit; the label stays short.
         layout = QtWidgets.QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(QtWidgets.QLabel(label))
@@ -72,7 +75,9 @@ class NumericFilter(QtWidgets.QWidget):
         self.value.setDecimals(decimals)
         self.value.setRange(0, maximum)
         self.value.setEnabled(False)
-        self.value.setMaximumWidth(110)
+        self.value.setFixedWidth(width)
+        self.value.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+        self.value.setObjectName('filterValue')
         layout.addWidget(self.operator)
         layout.addWidget(self.value)
         self.operator.currentIndexChanged.connect(self.update_operator)
@@ -86,6 +91,17 @@ class NumericFilter(QtWidgets.QWidget):
         return self.operator.currentData(), self.value.value()
 
 
+PANEL_GAP = 6
+
+
+def panel_widget(widget=None):
+    """A framed panel (styled by ``#panel`` in the stylesheets) on the darker window."""
+    widget = widget or QtWidgets.QWidget()
+    widget.setObjectName('panel')
+    widget.setAttribute(QtCore.Qt.WA_StyledBackground, True)
+    return widget
+
+
 class Browser(QtWidgets.QWidget):
     def __init__(self, config_path=None, preferences_path=None, access=None):
         super().__init__()
@@ -97,6 +113,7 @@ class Browser(QtWidgets.QWidget):
         self.player = Player(self.settings, self)
         self.player.error.connect(self.show_error)
         self.player.rating_requested.connect(self.rate_asset)
+        self.player.trim_requested.connect(self.trim_asset)
         self.preferences = Preferences(preferences_path)
         self.assets, self.errors = [], []
         self.edit_mode = False
@@ -104,49 +121,74 @@ class Browser(QtWidgets.QWidget):
         self._restoring_edit_selection = False
         self.selection_source = 'main'
         self._filtering = False
-        self.setWindowTitle('TinyLib · Studio library')
         self.resize(1580, 900)
         self.setFont(interface_font())
-        stylesheet = STYLE if HOSTED_IN_NUKE else (Path(__file__).with_name('standalone.qss').read_text(encoding='utf-8'))
-        self.setStyleSheet(stylesheet)
+        self.setObjectName('browser')
+        self.setStyleSheet(stylesheet(HOSTED_IN_NUKE))
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 12)
+        layout.setContentsMargins(10, 10, 10, 6)
+        layout.setSpacing(PANEL_GAP)
+        # Two panels side by side: the filters (search on row 1; numeric filters, tag
+        # picker, asset type and Clear filters on row 2) and the main buttons.
+        # The user and groups are in the window title.
         top = QtWidgets.QHBoxLayout()
-        heading = QtWidgets.QLabel('TinyLib  /  Studio library')
-        heading.setObjectName('heading')
-        heading.setFont(heading_font())
-        top.addWidget(heading)
-        top.addStretch()
-        self.identity_label = QtWidgets.QLabel(self.access.identity)
-        top.addWidget(self.identity_label)
+        second_row = self.make_filters(top)
+        # Buttons panel, right-aligned: admin and Refresh on the top row, Edit and Ingest below.
+        actions = QtWidgets.QHBoxLayout()
+        actions.addStretch()
+        actions_bottom = QtWidgets.QHBoxLayout()
+        actions_bottom.addStretch()
+        self.update_window_title()
         self.access_button = QtWidgets.QPushButton('Access rights…')
         self.access_button.clicked.connect(self.manage_access)
         self.access_button.setVisible(self.access.is_admin)
-        top.addWidget(self.access_button)
-        config_button = QtWidgets.QPushButton('Configuration…')
-        config_button.clicked.connect(self.configuration)
-        config_button.setEnabled(self.access.is_admin)
-        top.addWidget(config_button)
+        actions.addWidget(self.access_button)
+        self.config_button = QtWidgets.QPushButton('Configuration…')
+        self.config_button.clicked.connect(self.configuration)
+        self.config_button.setVisible(self.access.is_admin)
+        actions.addWidget(self.config_button)
         self.refresh = QtWidgets.QPushButton('Refresh')
         self.refresh.clicked.connect(lambda: self.reload(False))
-        top.addWidget(self.refresh)
+        actions.addWidget(self.refresh)
         self.edit_button = QtWidgets.QPushButton('Edit')
         self.edit_button.setCheckable(True)
         self.edit_button.setEnabled(False)
         self.edit_button.clicked.connect(self.toggle_edit)
-        top.addWidget(self.edit_button)
+        # Shown only while editing, directly beside the red Write button it pairs with.
+        self.cancel_edit_button = QtWidgets.QPushButton('Cancel edit')
+        self.cancel_edit_button.setToolTip('Discard your changes and leave edit mode.')
+        self.cancel_edit_button.clicked.connect(self.cancel_edit)
+        self.cancel_edit_button.hide()
+        actions_bottom.addWidget(self.cancel_edit_button)
+        actions_bottom.addWidget(self.edit_button)
         self.ingest_button = QtWidgets.QPushButton('+ Ingest asset')
         self.ingest_button.setObjectName('primary')
         self.ingest_button.clicked.connect(self.ingest)
-        top.addWidget(self.ingest_button)
-        layout.addLayout(top)
-        self.make_filters(layout)
+        actions_bottom.addWidget(self.ingest_button)
+        filters_panel = panel_widget()
+        filters_layout = QtWidgets.QVBoxLayout(filters_panel)
+        filters_layout.setContentsMargins(8, 6, 8, 6)
+        filters_layout.addLayout(top)
+        filters_layout.addLayout(second_row)
+        actions_panel = panel_widget()
+        actions_layout = QtWidgets.QVBoxLayout(actions_panel)
+        actions_layout.setContentsMargins(8, 6, 8, 6)
+        actions_layout.addLayout(actions)
+        actions_layout.addLayout(actions_bottom)
+        header = QtWidgets.QHBoxLayout()
+        header.setSpacing(PANEL_GAP)
+        header.addWidget(filters_panel, 1)
+        header.addWidget(actions_panel)
+        layout.addLayout(header)
         self.splitter = QtWidgets.QSplitter()
-        self.splitter.setHandleWidth(6)
-        library_panel = QtWidgets.QWidget()
+        self.splitter.setObjectName('panels')
+        self.splitter.setHandleWidth(PANEL_GAP)
+        library_panel = panel_widget()
         library_layout = QtWidgets.QVBoxLayout(library_panel)
-        library_layout.setContentsMargins(0, 0, 0, 0)
+        library_layout.setContentsMargins(6, 6, 6, 6)
         self.categories = QtWidgets.QTreeWidget()
+        self.categories.setObjectName('categories')
+        self.categories.setFrameShape(QtWidgets.QFrame.NoFrame)  # The panel already frames it.
         self.categories.setHeaderLabel('LIBRARIES / CATEGORIES')
         self.categories.setMinimumWidth(170)
         library_layout.addWidget(self.categories, 1)
@@ -156,19 +198,19 @@ class Browser(QtWidgets.QWidget):
         tools_menu = QtWidgets.QMenu(self.library_tools_button)
         crosscheck_action = tools_menu.addAction('Library crosscheck…')
         crosscheck_action.triggered.connect(self.library_crosscheck)
-        rescan_action = tools_menu.addAction('Rescan Metadata…')
+        rescan_action = tools_menu.addAction('Rescan metadata…')
         rescan_action.triggered.connect(self.rescan_metadata)
-        sort_action = tools_menu.addAction('Library Sort...')
+        sort_action = tools_menu.addAction('Library sort…')
         sort_action.triggered.connect(self.library_sort)
-        create_action = tools_menu.addAction('Create New Library...')
+        create_action = tools_menu.addAction('Create new library…')
         create_action.triggered.connect(self.create_new_library)
         self.library_tools_button.setMenu(tools_menu)
         self.library_tools_button.setVisible(self.access.is_admin)
         library_layout.addWidget(self.library_tools_button)
         self.splitter.addWidget(library_panel)
-        main = QtWidgets.QWidget()
+        main = panel_widget()
         main_layout = QtWidgets.QVBoxLayout(main)
-        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setContentsMargins(6, 6, 6, 6)
         self.make_controls(main_layout)
         self.cache = ImageCache(self)
         self.cache.activity.connect(self.preview_progress)
@@ -183,8 +225,10 @@ class Browser(QtWidgets.QWidget):
         self.grid.cards.info = self.info_toggle.isChecked()
         self.model = AssetModel(self)
         self.model.path_notation = self.preferences.data.get('display', {}).get('path_notation', 'nuke')
+        self.model.trim_for = self.preferences.trim  # The user's own in/out points.
         self.grid.setModel(self.model)
         self.table = DetailsView(self.grid.cards)
+        self.table.setFrameShape(QtWidgets.QFrame.NoFrame)
         self.table.setModel(self.model)
         self.table.setSelectionModel(self.grid.selectionModel())
         for view in (self.grid, self.table):
@@ -199,7 +243,9 @@ class Browser(QtWidgets.QWidget):
         main_layout.addWidget(self.stack, 1)
         self.splitter.addWidget(main)
         self.collections = CollectionsPanel(self.preferences, self.cache, self.access)
+        panel_widget(self.collections)
         self.collections.model.path_notation = self.model.path_notation
+        self.collections.model.trim_for = self.collections.trim_for
         self.collections.hide()
         self.collections.changed.connect(self.collections_changed)
         self.collections.selected.connect(self.collection_selection)
@@ -209,6 +255,8 @@ class Browser(QtWidgets.QWidget):
         self.splitter.addWidget(self.collections)
         self.make_properties()
         self.splitter.setSizes([190, 1000, 0, 300])
+        self.details_panel.setVisible(self.details_toggle.isChecked())
+        self.details_toggle.toggled.connect(self.toggle_details)
         layout.addWidget(self.splitter, 1)
         self.status = QtWidgets.QLabel('Loading libraries…')
         self.status.setObjectName('muted')
@@ -225,8 +273,6 @@ class Browser(QtWidgets.QWidget):
         self.debounce.setInterval(140)
         self.debounce.timeout.connect(self.filter)
         self.search.textChanged.connect(lambda: self.debounce.start())
-        self.tags.textChanged.connect(lambda: self.debounce.start())
-        self.invert.toggled.connect(self.filter)
         self.kind.currentIndexChanged.connect(self.filter)
         for widget in (self.length_filter, self.width_filter, self.stars_filter):
             widget.changed.connect(self.filter)
@@ -254,47 +300,41 @@ class Browser(QtWidgets.QWidget):
         threading.Thread(target=prune_cache, args=(self.cache.disk_root,), daemon=True).start()
         self.reload()
 
-    def make_filters(self, layout):
-        filters = QtWidgets.QHBoxLayout()
-        filters.addWidget(QtWidgets.QLabel('Fulltext'))
+    def make_filters(self, top):
+        """Add the fulltext search to ``top``; return the second row with the other filters."""
+        top.addWidget(QtWidgets.QLabel('Search'))
         self.search = QtWidgets.QLineEdit()
+        self.search.setObjectName('search')  # Styled as tall as the buttons beside it.
         self.search.setPlaceholderText('Search names, categories, keywords; {field}:text')
         self.search.setToolTip('Combine text and JSON field filters, e.g. fire {acquire price}:usd. '
                                'Use quotes for phrases: {ingest note}:"slow motion". '
                                'Exclude with !burst, !"big burst", or {ingest note}!burst. '
                                'Nested keys: {metadata.width}:1920. All terms must match.')
         self.search.setClearButtonEnabled(True)
-        filters.addWidget(self.search, 2)
-        self.invert = QtWidgets.QCheckBox('Invert')
-        self.invert.setToolTip('Exclude fulltext matches; other filters still apply.')
-        filters.addWidget(self.invert)
-        filters.addWidget(QtWidgets.QLabel('Tags'))
-        self.tags = QtWidgets.QLineEdit()
-        self.tags.setClearButtonEnabled(True)
-        self.tags.setPlaceholderText('Exact tags, comma-separated (all match)')
-        filters.addWidget(self.tags, 1)
+        top.addWidget(self.search, 2)
+        row = QtWidgets.QHBoxLayout()
+        self.length_filter = NumericFilter('Length', 1000000, 3, tooltip='Length in seconds (frames ÷ frame rate)', width=80)
+        self.width_filter = NumericFilter('Width', 1000000, tooltip='Width in pixels', width=64)
+        self.stars_filter = NumericFilter('Stars', 5, tooltip='Star rating, 0 to 5', width=36)
+        for widget in (self.length_filter, self.width_filter, self.stars_filter):
+            row.addWidget(widget)
+        row.addSpacing(16)
         self.tag_picker = QtWidgets.QComboBox()
+        self.tag_picker.setToolTip('Adds {tags}:<tag> to the search.')
         self.tag_picker.setMaximumWidth(150)
         self.tag_picker.addItem('Pick tag…')
         self.tag_picker.activated.connect(self.pick_tag)
-        filters.addWidget(self.tag_picker)
+        row.addWidget(self.tag_picker)
         self.kind = QtWidgets.QComboBox()
         self.kind.addItem('All asset types', '')
         for identifier, definition in ASSET_TYPES.items():
             self.kind.addItem(definition['label'], identifier)
-        filters.addWidget(self.kind)
-        layout.addLayout(filters)
-        numeric = QtWidgets.QHBoxLayout()
-        self.length_filter = NumericFilter('Length (seconds)', 1000000, 3)
-        self.width_filter = NumericFilter('Width (pixels)', 1000000)
-        self.stars_filter = NumericFilter('Stars', 5)
-        for widget in (self.length_filter, self.width_filter, self.stars_filter):
-            numeric.addWidget(widget)
-        numeric.addStretch()
+        row.addWidget(self.kind)
         clear = QtWidgets.QPushButton('Clear filters')
         clear.clicked.connect(self.clear_filters)
-        numeric.addWidget(clear)
-        layout.addLayout(numeric)
+        row.addWidget(clear)
+        row.addStretch()
+        return row
 
     def make_controls(self, layout):
         row = QtWidgets.QHBoxLayout()
@@ -320,6 +360,11 @@ class Browser(QtWidgets.QWidget):
         self.collection_toggle.setCheckable(True)
         self.collection_toggle.toggled.connect(self.toggle_collections)
         row.addWidget(self.collection_toggle)
+        self.details_toggle = QtWidgets.QPushButton('Details')
+        self.details_toggle.setCheckable(True)
+        self.details_toggle.setChecked(self.preferences.data.get('display', {}).get('details_panel', True))
+        self.details_toggle.setToolTip('Show or hide the asset details panel.')
+        row.addWidget(self.details_toggle)
         self.caption_button = QtWidgets.QPushButton('Tile text…')
         self.caption_button.clicked.connect(self.configure_tile_text)
         row.addWidget(self.caption_button)
@@ -353,7 +398,7 @@ class Browser(QtWidgets.QWidget):
         layout.addLayout(row)
 
     def make_properties(self):
-        panel = QtWidgets.QWidget()
+        panel = self.details_panel = panel_widget()
         panel.setMinimumWidth(240)
         details = QtWidgets.QVBoxLayout(panel)
         self.detail_image = QtWidgets.QLabel('Select an asset')
@@ -386,17 +431,17 @@ class Browser(QtWidgets.QWidget):
         self.splitter.addWidget(panel)
 
     def pick_tag(self, index):
+        """Add the picked tag to the search as a {tags}: filter."""
         if index:
-            tags = [t.strip() for t in self.tags.text().split(',') if t.strip()]
             tag = self.tag_picker.itemText(index)
-            if tag not in tags:
-                self.tags.setText(', '.join(tags + [tag]))
+            term = '{tags}:' + ('"%s"' % tag.replace('"', '\\"') if re.search(r'[\s{}"\']', tag) else tag)
+            text = self.search.text().strip()
+            if term not in text.split():
+                self.search.setText((text + ' ' + term).strip())
             self.tag_picker.setCurrentIndex(0)
 
     def clear_filters(self):
         self.search.clear()
-        self.tags.clear()
-        self.invert.setChecked(False)
         self.kind.setCurrentIndex(0)
         for widget in (self.length_filter, self.width_filter, self.stars_filter):
             widget.operator.setCurrentIndex(0)
@@ -422,8 +467,8 @@ class Browser(QtWidgets.QWidget):
         # Open review players stay open; they hold their own copy of the asset.
         self.registry.reload()
         self.ingest_button.setEnabled(any(not (library.get('read_only') or self.access.read_only(library['root'])) and self.access.can(library['root'], 'ingest') for library in configs))
-        self.access_button.setVisible(self.access.is_admin)
-        self.library_tools_button.setVisible(self.access.is_admin)
+        self.update_window_title()
+        self.update_admin_controls()
         if getattr(self, 'loader', None) is not None:
             self.loader.deleteLater()  # Finished (checked above); don't keep one per Refresh.
         self.loader = Loader(configs, self, use_index_cache=use_index_cache)
@@ -555,7 +600,7 @@ class Browser(QtWidgets.QWidget):
                       and (not category or a['category'] == category or a['category'].startswith(category + '/'))
                       and (not kind or a.get('kind') == kind)
                       and asset_key(a) not in picked
-                      and accepts(a, self.search.text(), self.invert.isChecked(), self.tags.text().split(','),
+                      and accepts(a, self.search.text(), False, (),
                                   self.length_filter.rule(), self.width_filter.rule(), self.stars_filter.rule(), a['_rating'])]
             self.grid.cards.hover_row = -1
             self.model.replace(result)
@@ -704,6 +749,7 @@ class Browser(QtWidgets.QWidget):
         self.edit_button.setChecked(editing)
         self.edit_button.blockSignals(False)
         self.edit_button.setText('Write' if editing else 'Edit')
+        self.cancel_edit_button.setVisible(editing)
         self.edit_button.setStyleSheet(
             'QPushButton { background: #a62828; border-color: #ef5b5b; color: white; font-weight: bold; }'
             if editing else '')
@@ -711,7 +757,7 @@ class Browser(QtWidgets.QWidget):
     def _freeze_for_edit(self, editing):
         # Keep both asset views active: choosing another item commits the draft.
         for widget in (self.refresh, self.ingest_button, self.categories, self.search,
-                       self.invert, self.tags, self.tag_picker, self.kind,
+                       self.tag_picker, self.kind,
                        self.length_filter, self.width_filter, self.stars_filter,
                        self.library_tools_button):
             widget.setEnabled(not editing)
@@ -733,6 +779,8 @@ class Browser(QtWidgets.QWidget):
 
     def toggle_edit(self, checked):
         if checked:
+            if not self.details_toggle.isChecked():
+                self.details_toggle.setChecked(True)  # Editing happens in the details panel.
             self.begin_edit()
         else:
             self.write_edit()
@@ -926,7 +974,8 @@ class Browser(QtWidgets.QWidget):
         assets = self.selected_assets()
         if not assets:
             return
-        QtWidgets.QApplication.clipboard().setText(format_assets(assets, self.path_notation.currentData()))
+        QtWidgets.QApplication.clipboard().setText(format_assets(assets, self.path_notation.currentData(),
+                                                                 self.trim_source(self.selection_source == 'collection')))
         self.status.setText('Copied %d asset path%s.' % (len(assets), '' if len(assets) == 1 else 's'))
 
     def update_detail_image(self):
@@ -988,6 +1037,13 @@ class Browser(QtWidgets.QWidget):
             self.selection_source = 'main'
             self.selection()
 
+    def toggle_details(self, enabled):
+        self.details_panel.setVisible(enabled)
+        try:
+            self.preferences.set_display(details_panel=enabled)
+        except Exception as error:
+            self.show_error(str(error))
+
     def collections_changed(self):
         self.filter()
 
@@ -997,7 +1053,11 @@ class Browser(QtWidgets.QWidget):
             try:
                 self.access.refresh()
                 self.access.require(assets[0]['library_root'], 'view')
-                self.player.play(assets[0])
+                # Played from a collection, the player uses and edits that collection's in/out points;
+                # otherwise the user's own.
+                collection = self.collections.combo.currentData() if self.selection_source == 'collection' else None
+                trim = self.preferences.trim(assets[0], collection)
+                self.player.play(dict(assets[0], _trim=trim, _trim_collection=collection))
             except Exception as error:
                 self.show_error(str(error))
 
@@ -1014,10 +1074,15 @@ class Browser(QtWidgets.QWidget):
         try:
             result = self.registry.run(identifier, assets, self.access,
                                        {'parent': self, 'settings': self.settings,
-                                        'collection': self.collections.combo.currentText() if collection else None})
+                                        'collection': self.collections.combo.currentText() if collection else None,
+                                        'trim': self.trim_source(collection)})
             self.status.setText(str(result) if isinstance(result, str) else 'Action completed.')
         except Exception as error:
             self.show_error(str(error))
+
+    def trim_source(self, collection):
+        """asset -> in/out points: the current collection's, or the user's own."""
+        return self.collections.trim_for if collection else self.preferences.trim
 
     def rate_asset(self, asset, stars):
         try:
@@ -1032,7 +1097,25 @@ class Browser(QtWidgets.QWidget):
         except Exception as error:
             self.show_error(str(error))
 
+    def trim_asset(self, asset, trim):
+        try:
+            self.preferences.set_trim(asset, trim, asset.get('_trim_collection'))
+            where = ' in the collection' if asset.get('_trim_collection') else ''
+            if trim:
+                self.status.setText('Set %s in/out to %d–%d%s.' % (asset.get('name', 'asset'), trim[0], trim[1], where))
+            else:
+                self.status.setText('Cleared %s in/out%s.' % (asset.get('name', 'asset'), where))
+        except Exception as error:
+            self.show_error(str(error))
+
+    def update_admin_controls(self):
+        """Admin-only controls are hidden, not just disabled, for everyone else."""
+        for widget in (self.access_button, self.config_button, self.library_tools_button):
+            widget.setVisible(self.access.is_admin)
+
     def manage_access(self):
+        if not self.require_admin():
+            return
         try:
             dialog = AccessDialog(self.access, self.registry, self)
             accepted = exec_dialog(dialog)
@@ -1044,8 +1127,7 @@ class Browser(QtWidgets.QWidget):
             self.show_error(str(error))
 
     def library_crosscheck(self):
-        if not self.access.is_admin:
-            self.show_error('Library tools require an administrator account.')
+        if not self.require_admin():
             return
         current = self.categories.currentItem()
         root = current.data(0, QtCore.Qt.UserRole)[0] if current else ''
@@ -1062,7 +1144,7 @@ class Browser(QtWidgets.QWidget):
             if not accepted:
                 return
             library = libraries[names.index(name)]
-        dialog = CrosscheckDialog(library, self)
+        dialog = CrosscheckDialog(library, self, self.access)
         exec_dialog(dialog)
         result = dialog.crosscheck_result
         dialog.deleteLater()
@@ -1070,8 +1152,8 @@ class Browser(QtWidgets.QWidget):
             self.status.setText('Library crosscheck saved: ' + result['log_path'])
 
     def create_new_library(self):
-        if not self.access.is_admin:
-            return self.show_error('Library tools require an administrator account.')
+        if not self.require_admin():
+            return
         dialog = CreateLibraryDialog(self.settings, self.access, self)
         exec_dialog(dialog)
         created = dialog.created_library
@@ -1081,8 +1163,8 @@ class Browser(QtWidgets.QWidget):
             self.reload(use_index_cache=False)
 
     def library_sort(self):
-        if not self.access.is_admin:
-            return self.show_error('Library tools require an administrator account.')
+        if not self.require_admin():
+            return
         if self.edit_session:
             return self.show_error('Finish editing before sorting the library.')
         current = self.categories.currentItem()
@@ -1095,9 +1177,9 @@ class Browser(QtWidgets.QWidget):
             if root:
                 return self.show_error('The selected library is read-only or unavailable for editing.')
             if not libraries:
-                return self.show_error('No writable library is available for Library Sort.')
+                return self.show_error('No writable library is available for library sort.')
             names = [item['name'] for item in libraries]
-            name, accepted = QtWidgets.QInputDialog.getItem(self, 'Library Sort', 'Library', names, 0, False)
+            name, accepted = QtWidgets.QInputDialog.getItem(self, 'Library sort', 'Library', names, 0, False)
             if not accepted:
                 return
             library = libraries[names.index(name)]
@@ -1109,8 +1191,7 @@ class Browser(QtWidgets.QWidget):
             self.reload(use_index_cache=False)
 
     def rescan_metadata(self):
-        if not self.access.is_admin:
-            self.show_error('Library tools require an administrator account.')
+        if not self.require_admin():
             return
         assets = list(self.selected_assets())
         if not assets:
@@ -1126,7 +1207,7 @@ class Browser(QtWidgets.QWidget):
                     self.show_error('No visible library is available for metadata rescan.')
                     return
                 name, accepted = QtWidgets.QInputDialog.getItem(
-                    self, 'Rescan Metadata', 'Library', names, 0, False)
+                    self, 'Rescan metadata', 'Library', names, 0, False)
                 if not accepted:
                     return
                 library = libraries[names.index(name)]
@@ -1142,6 +1223,17 @@ class Browser(QtWidgets.QWidget):
         if accepted and scan and scan['results']:
             self.write_rescanned_metadata(scan['results'])
 
+    def require_admin(self):
+        """Re-read the security file; only administrators may use Library tools."""
+        try:
+            require_admin(self.access)
+            return True
+        except PermissionError as error:
+            self.show_error(str(error))
+            return False
+        finally:
+            self.update_admin_controls()
+
     def write_rescanned_metadata(self, results):
         groups = {}
         for result in results:
@@ -1150,7 +1242,7 @@ class Browser(QtWidgets.QWidget):
         plans = []
         updated_assets = []
         try:
-            self.access.refresh()
+            require_admin(self.access)
             for root, items in groups.items():
                 asset = items[0]['asset']
                 config = writable_library(self.settings, self.access, asset)
@@ -1214,9 +1306,14 @@ class Browser(QtWidgets.QWidget):
         except Exception as error:
             self.show_error(str(error))
 
+    def update_window_title(self):
+        """Window title with the user and its groups, e.g. "TinyLib · Studio library · jan (admins, artists)"."""
+        groups = ', '.join(sorted(self.access.groups))
+        user = '%s (%s)' % (self.access.identity, groups) if groups else self.access.identity
+        self.setWindowTitle('TinyLib · Studio library · ' + user)
+
     def configuration(self):
-        self.access.refresh()
-        if self.access.is_admin:
+        if self.require_admin():
             QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(self.settings['_config_path']))
 
     def shutdown(self):

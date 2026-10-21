@@ -46,3 +46,28 @@ class LibraryCrosscheckTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class LibraryToolsAdminOnlyTests(unittest.TestCase):
+    def test_non_admins_are_refused_by_every_tool(self):
+        from unittest.mock import Mock
+        from tinylib.library_tools import create_new_library, require_admin, sort_library
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        atomic_json(root / 'tinylib_data.json', {'schema_version': 3, 'assets': []})
+        artist = Mock(is_admin=False)
+        library = {'name': 'Test', 'root': str(root)}
+        settings = {'libraries': [library]}
+        calls = (lambda: require_admin(artist),
+                 lambda: crosscheck_library(root, 'Test', root / 'out', access=artist),
+                 lambda: sort_library(settings, artist, library),
+                 lambda: create_new_library(settings, artist, 'New', str(root / 'new')))
+        for call in calls:
+            with self.assertRaisesRegex(PermissionError, 'administrator'):
+                call()
+        self.assertEqual(artist.refresh.call_count, len(calls))  # The security file is re-read each time.
+        self.assertFalse((root / 'out').exists())
+        admin = Mock(is_admin=True)
+        crosscheck_library(root, 'Test', root / 'out', access=admin)
+        self.assertTrue((root / 'out').is_dir())

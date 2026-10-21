@@ -39,6 +39,12 @@ def validate_settings(data, path):
     for key in ('tools', 'profiles', 'deadline'):
         if not isinstance(data.get(key, {}), dict):
             fail('"%s" must be an object.' % key)
+    web = data.get('deadline', {}).get('web_service', {})
+    if not isinstance(web, dict):
+        fail('"deadline.web_service" must be an object.')
+    for key in ('require_authentication', 'verify_ssl'):
+        if key in web and not isinstance(web[key], bool):
+            fail('deadline.web_service.%s must be true or false.' % key)
     for name, value in list(data.get('tools', {}).items()):
         if value is None:
             del data['tools'][name]  # null means "use the default on PATH".

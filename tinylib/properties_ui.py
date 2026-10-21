@@ -88,13 +88,6 @@ class PropertiesEditor(QtWidgets.QWidget):
         self.message = QtWidgets.QLabel()
         self.message.setWordWrap(True)
         layout.addWidget(self.message)
-        self.buttons = QtWidgets.QWidget()
-        row = QtWidgets.QHBoxLayout(self.buttons)
-        row.setContentsMargins(0, 0, 0, 0)
-        self.cancel = QtWidgets.QPushButton('Cancel edit')
-        self.cancel.clicked.connect(self.cancel_requested.emit)
-        row.addWidget(self.cancel)
-        layout.addWidget(self.buttons)
         for key, field in self.fields.items():
             if isinstance(field, (QtWidgets.QLineEdit, QtWidgets.QPlainTextEdit)):
                 field.textChanged.connect(lambda *_, key=key: self.text_changed(key))
@@ -245,7 +238,6 @@ class PropertiesEditor(QtWidgets.QWidget):
                 field.setReadOnly(not enabled)
             self.style_field(key, field)
         self.metadata.setEditTriggers(QtWidgets.QAbstractItemView.DoubleClicked | QtWidgets.QAbstractItemView.EditKeyPressed if self.editing and len(self.assets) == 1 else QtWidgets.QAbstractItemView.NoEditTriggers)
-        self.buttons.setVisible(self.editing)
 
     def field_allowed(self, key):
         return bool(self.assets) and (self.access is None or

@@ -253,7 +253,11 @@ class CollectionsPanel(QtWidgets.QWidget):
             self.error.emit('The current collection has no accessible assets to copy.')
             return
         notation = self.preferences.data.get('display', {}).get('path_notation', 'nuke')
-        QtWidgets.QApplication.clipboard().setText(format_assets(assets, notation))
+        QtWidgets.QApplication.clipboard().setText(format_assets(assets, notation, self.trim_for))
+
+    def trim_for(self, asset):
+        """This collection's in/out points for an asset."""
+        return self.preferences.trim(asset, self.combo.currentData())
 
     def downloads(self):
         return QtCore.QStandardPaths.writableLocation(QtCore.QStandardPaths.DownloadLocation) or str(Path.home() / 'Downloads')

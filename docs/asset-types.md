@@ -4,7 +4,7 @@ TinyLib's versioned asset schema is defined in `tinylib/asset_types.py`. Extensi
 
 | Type | Main | Optional representations | Metadata |
 | --- | --- | --- | --- |
-| Still | still or camera-raw image | highres image, JPEG proxy | width, height, pixel aspect, colorspace, equirectangular/raw flags, timecode, frame rate, reel ID, sizes |
+| Still | still or camera-raw image | highres image, JPEG proxy | width, height, pixel aspect, equirectangular/raw flags, timecode, frame rate, reel ID, sizes. The color space is the asset's own **Color space** field, not metadata. |
 | Footage | image sequence, camera-raw sequence or footage container | highres, MP4 proxy, JPEG filmstrip | Still fields plus frame duration, seconds and frame range |
 | Model | model file | highres model, proxy model, scene | faces, UV/textured/rigged/animated flags, relative texture paths, source DCC, renderer, sizes |
 | Folder | folder containing any files | highres folder, proxy folder | relative file list and sizes |

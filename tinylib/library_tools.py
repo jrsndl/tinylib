@@ -84,8 +84,17 @@ def _storage_asset_folders(root):
     return folders
 
 
-def crosscheck_library(root, name, output_dir=None, progress=None, cancelled=None, now=None):
+def require_admin(access):
+    """Admin-only features (library tools, access rights, configuration): re-read the security file to be sure."""
+    access.refresh()
+    if not access.is_admin:
+        raise PermissionError('Only administrators can use this.')
+
+
+def crosscheck_library(root, name, output_dir=None, progress=None, cancelled=None, now=None, access=None):
     """Check JSON references and category/asset folders, then write a text report."""
+    if access is not None:
+        require_admin(access)
     root = Path(root)
     database = root / DATABASE_FILENAME
     document = read_json(database)
@@ -172,32 +181,30 @@ def sort_library(settings, access, library, override=False, progress=None):
     from .edit_lock import acquire_edit_lock, assert_edit_write_allowed, release_edit_lock
     from .library import atomic_json, library_lock
     report = progress or (lambda message: None)
-    report('Checking library write access...')
-    access.refresh()
-    if not access.is_admin:
-        raise PermissionError('Library tools require an administrator account.')
+    report('Checking library write access…')
+    require_admin(access)
     config = writable_library(settings, access, {'library_root': library['root']})
-    report('Acquiring library edit lock...')
+    report('Acquiring library edit lock…')
     handle = acquire_edit_lock(config['root'], access.identity, override=override)
     try:
         with library_lock(config['root']):
             assert_edit_write_allowed(config['root'], handle['token'])
-            report('Reading latest library database...')
+            report('Reading latest library database…')
             database = Path(config['root']) / DATABASE_FILENAME
             document = read_json(database)
             if document.get('schema_version') != 3 or not isinstance(document.get('assets'), list):
-                raise ValueError('Library Sort requires a schema_version 3 tinylib_data.json.')
+                raise ValueError('Library sort requires a schema_version 3 tinylib_data.json.')
             records = document['assets']
             if any(not isinstance(record, dict) or not isinstance(record.get('name'), str)
                    or not isinstance(record.get('category'), str) for record in records):
                 raise ValueError('Every asset must have a category and name to sort the library.')
-            report('Sorting %d assets alphabetically...' % len(records))
+            report('Sorting %d assets alphabetically…' % len(records))
             ordered = sorted(records, key=lambda record: (
                 record['category'].replace('\\', '/').casefold(), record['name'].casefold()))
             changed = records != ordered
             if changed:
                 document['assets'] = ordered
-                report('Saving sorted library database...')
+                report('Saving sorted library database…')
                 atomic_json(database, document)
             return {'assets': len(records), 'changed': changed}
     finally:
@@ -213,9 +220,7 @@ def create_new_library(settings, access, name, root, template_root=None, read_on
     from .library import atomic_json, library_lock
     from .edit_lock import assert_edit_write_allowed
     report = progress or (lambda message: None)
-    access.refresh()
-    if not access.is_admin:
-        raise PermissionError('Library tools require an administrator account.')
+    require_admin(access)
     name, root_text = name.strip(), str(root).strip()
     if not name or not root_text:
         raise ValueError('Enter a library name and root folder.')
@@ -229,7 +234,7 @@ def create_new_library(settings, access, name, root, template_root=None, read_on
         value = Path(os.path.expandvars(entry['root']))
         return root_key((value if value.is_absolute() else path.parent / value).resolve())
 
-    report('Locking library and studio configuration...')
+    report('Locking library and studio configuration…')
     folders = {root_key(root): root, root_key(config_path.parent): config_path.parent}
     if access.persist:
         folders[root_key(security_path.parent)] = security_path.parent
@@ -274,9 +279,9 @@ def create_new_library(settings, access, name, root, template_root=None, read_on
             security.setdefault('libraries', []).append(copy.deepcopy(library))
         written = []
         try:
-            report('Creating empty library database...')
+            report('Creating empty library database…')
             atomic_json(database, {'schema_version': 3, 'asset_type_schema_version': SCHEMA_VERSION, 'assets': []})
-            report('Registering new library...')
+            report('Registering new library…')
             atomic_json(config_path, document)
             written.append((config_path, before_config))
             if access.persist and security_path != config_path:

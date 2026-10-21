@@ -199,6 +199,11 @@ class Library:
             # Migrate rather than duplicate: the properties panel would otherwise show both.
             result['metadata']['frame_rate'] = legacy_rate
             result['metadata'].pop('FPS', None)
+        # Older ingests also stored the color space in metadata; the asset field is the one
+        # that is edited and used, so the copy is dropped (and leaves the database on the next write).
+        legacy_space = result['metadata'].pop('colorspace', None)
+        if not result.get('colorspace') and isinstance(legacy_space, str) and legacy_space.strip():
+            result['colorspace'] = legacy_space.strip()
         result.setdefault('colorspace', 'ACEScg')
         result['library'] = self.name
         result['library_root'] = str(self.root)

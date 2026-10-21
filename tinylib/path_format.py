@@ -2,6 +2,7 @@
 import re
 from pathlib import PurePosixPath
 from .library import frame_path, split_sequence
+from .trim import clean_trim
 
 FORMATS = [
     ('nuke', 'Nuke — #### plus range'),
@@ -38,7 +39,18 @@ def hashes(pattern, token):
     return pattern[:token.start()] + '#' * width + pattern[token.end():], width
 
 
-def format_asset(asset, notation='nuke'):
+def trimmed_range(first, last, trim):
+    """The in/out points inside ``first..last``; the full range when there are none or they miss it."""
+    trim = clean_trim(trim)
+    if not trim:
+        return first, last
+    start, end = max(int(first), trim[0]), min(int(last), trim[1])
+    return (start, end) if start <= end else (first, last)
+
+
+def format_asset(asset, notation='nuke', trim=None):
+    """Paths for one asset. ``trim`` (in, out) narrows the frame range of the notations that
+    carry one: Nuke, AYON and Flame."""
     if notation not in FORMAT_IDS:
         notation = 'nuke'
     pattern, first, last, token = sequence_parts(asset)
@@ -47,6 +59,7 @@ def format_asset(asset, notation='nuke'):
     if not token or first is None or last is None:
         return [pattern]
     hash_pattern, width = hashes(pattern, token)
+    first, last = trimmed_range(first, last, trim)
     if notation == 'ayon':
         return [forward(frame_path(hash_pattern, frame)) for frame in range(int(first), int(last) + 1)]
     if notation == 'hashtag':
@@ -61,6 +74,8 @@ def format_asset(asset, notation='nuke'):
     return ['%s %s-%s' % (hash_pattern, first, last)]
 
 
-def format_assets(assets, notation='nuke'):
-    paths = [path for asset in assets for path in format_asset(asset, notation)]
+def format_assets(assets, notation='nuke', trim_for=None):
+    """``trim_for(asset)`` returns the in/out points to use for an asset, or None."""
+    paths = [path for asset in assets
+             for path in format_asset(asset, notation, trim_for(asset) if trim_for else None)]
     return (', ' if notation == 'ayon' else '\n').join(paths)

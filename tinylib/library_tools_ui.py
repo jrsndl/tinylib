@@ -15,9 +15,10 @@ class CrosscheckWorker(QtCore.QThread):
     failed = QtCore.Signal(str)
     cancelled = QtCore.Signal()
 
-    def __init__(self, library, parent=None):
+    def __init__(self, library, parent=None, access=None):
         super().__init__(parent)
         self.library = library
+        self.access = access
 
     def run(self):
         last_emit = [0.0, -1]
@@ -31,7 +32,7 @@ class CrosscheckWorker(QtCore.QThread):
         try:
             result = crosscheck_library(
                 self.library['root'], self.library['name'], progress=report,
-                cancelled=self.isInterruptionRequested)
+                cancelled=self.isInterruptionRequested, access=self.access)
             self.completed.emit(result)
         except CrosscheckCancelled:
             self.cancelled.emit()
@@ -40,7 +41,7 @@ class CrosscheckWorker(QtCore.QThread):
 
 
 class CrosscheckDialog(QtWidgets.QDialog):
-    def __init__(self, library, parent=None):
+    def __init__(self, library, parent=None, access=None):
         super().__init__(parent)
         self.library = library
         self.crosscheck_result = None
@@ -67,7 +68,7 @@ class CrosscheckDialog(QtWidgets.QDialog):
         row.addWidget(self.cancel_button)
         row.addWidget(self.close_button)
         layout.addLayout(row)
-        self.worker = CrosscheckWorker(library, self)
+        self.worker = CrosscheckWorker(library, self, access)
         self.worker.progress.connect(self.show_progress)
         self.worker.completed.connect(self.complete)
         self.worker.failed.connect(self.fail)
@@ -158,7 +159,7 @@ class MetadataRescanDialog(QtWidgets.QDialog):
     def __init__(self, assets, settings, parent=None):
         super().__init__(parent)
         self.scan_result = None
-        self.setWindowTitle('Rescan Metadata')
+        self.setWindowTitle('Rescan metadata')
         self.resize(760, 500)
         layout = QtWidgets.QVBoxLayout(self)
         self.summary = QtWidgets.QLabel('Preparing metadata scan for %d asset(s)…' % len(assets))
@@ -257,10 +258,10 @@ class LibrarySortDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.library, self.settings, self.access = library, settings, access
         self.sort_result, self.error = None, None
-        self.setWindowTitle('Library Sort - ' + library['name'])
+        self.setWindowTitle('Library sort · ' + library['name'])
         self.resize(520, 150)
         layout = QtWidgets.QVBoxLayout(self)
-        self.summary = QtWidgets.QLabel('Preparing Library Sort...')
+        self.summary = QtWidgets.QLabel('Preparing library sort…')
         self.summary.setWordWrap(True)
         layout.addWidget(self.summary)
         self.progress_bar = QtWidgets.QProgressBar()
@@ -295,7 +296,7 @@ class LibrarySortDialog(QtWidgets.QDialog):
               and self.parentWidget().confirm_edit_override(self.error.locks)):
             self.start_sort(override=True)
         else:
-            self.summary.setText('Library Sort failed: ' + str(self.error))
+            self.summary.setText('Library sort failed: ' + str(self.error))
             self.progress_bar.setRange(0, 1)
             self.close_button.setEnabled(True)
 
@@ -333,7 +334,7 @@ class CreateLibraryDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.settings, self.access = settings, access
         self.created_library, self.worker = None, None
-        self.setWindowTitle('Create New Library')
+        self.setWindowTitle('Create new library')
         self.resize(600, 240)
         layout = QtWidgets.QVBoxLayout(self)
         self.inputs = QtWidgets.QWidget()
@@ -345,7 +346,7 @@ class CreateLibraryDialog(QtWidgets.QDialog):
         row = QtWidgets.QHBoxLayout(folder)
         row.setContentsMargins(0, 0, 0, 0)
         self.root = QtWidgets.QLineEdit()
-        browse = QtWidgets.QPushButton('Choose folder...')
+        browse = QtWidgets.QPushButton('Choose folder…')
         browse.clicked.connect(self.browse)
         row.addWidget(self.root, 1)
         row.addWidget(browse)
