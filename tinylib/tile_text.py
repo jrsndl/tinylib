@@ -4,7 +4,7 @@ import string
 from .filters import duration
 from .asset_fields import display_name
 
-DEFAULT_TEMPLATE = r'{name}\n{type} · {width} × {height}'
+DEFAULT_TEMPLATE = r'{name}\n{width} × {height} {length} s'
 # {name} shows the label when the asset has one; {ingest_name} is always the name used at ingest.
 TOKENS = ('name', 'ingest_name', 'library', 'category', 'type', 'colorspace', 'tags', 'width', 'height', 'fps', 'length', 'first', 'last')
 

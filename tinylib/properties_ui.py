@@ -11,7 +11,7 @@ SUMMARY_KEYS = ('name', 'library', 'category', 'kind', 'parts', 'range')
 
 
 def visible_metadata(key, value):
-    return (key.casefold() not in ('path', 'file', 'filename', 'source', 'main', 'proxy', 'thumb', 'filmstrip', 'highres')
+    return (key.casefold() not in ('path', 'file', 'filename', 'source', 'main', 'main-original', 'proxy', 'thumb', 'filmstrip', 'highres')
             and not (isinstance(value, str) and re.match(r'^(?:[a-zA-Z]:[/\\]|[/\\]{1,2})', value)))
 
 

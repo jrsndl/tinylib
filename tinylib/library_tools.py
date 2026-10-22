@@ -39,7 +39,7 @@ def _listed_paths(root, record):
     library = Library(root)
     kind = canonical_type(record.get('kind', 'still'))
     roles = list(ASSET_TYPES.get(kind, {}).get('representations', {}))
-    for role in ('main', 'highres', 'proxy', 'thumb', 'filmstrip', 'scene'):
+    for role in ('main', 'main-original', 'highres', 'proxy', 'thumb', 'filmstrip', 'scene'):
         if role not in roles:
             roles.append(role)
     for role in roles:

@@ -50,6 +50,7 @@ Python 3.9+ and PySide6 or PySide2 are needed for the standalone browser. Inside
 - [Configuration reference](docs/configuration.md): every key in `tinylib.ini`, the browser configuration and the security file.
 - [Security setup](docs/security.md): the security file, Windows permissions and the first administrator.
 - [Studio actions and access](docs/actions-and-access.md): groups, grants and Python action packages.
+- [Publish to AYON](docs/ayon-publish.md): the bundled action that publishes footage and stills to AYON (and ftrack).
 - [Asset types and metadata](docs/asset-types.md): types, representations, extension groups and fields.
 - [Development](docs/development.md): tests, CI, linting and packaging.
 - [Changelog](CHANGELOG.md)

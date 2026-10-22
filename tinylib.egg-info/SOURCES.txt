@@ -4,6 +4,7 @@ tests/test_access_actions.py
 tests/test_admin_cli.py
 tests/test_asset_edit.py
 tests/test_asset_types.py
+tests/test_ayon_publish.py
 tests/test_common_fields.py
 tests/test_core.py
 tests/test_create_library.py
@@ -14,13 +15,18 @@ tests/test_folder_ingest.py
 tests/test_hdri.py
 tests/test_ingest_metadata.py
 tests/test_install.py
+tests/test_keywords.py
 tests/test_label.py
+tests/test_labels.py
 tests/test_library_sort.py
 tests/test_library_tools.py
 tests/test_metadata_scan.py
 tests/test_multiedit.py
+tests/test_numeric_filter.py
 tests/test_packaging.py
+tests/test_parts.py
 tests/test_path_format.py
+tests/test_player_navigation.py
 tests/test_preferences_filters.py
 tests/test_storage.py
 tests/test_thumbnail_cache.py

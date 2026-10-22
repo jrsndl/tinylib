@@ -8,6 +8,7 @@
 | --- | --- | --- |
 | `pyside6` | `PySide6>=6.5` | Nuke 16+ and new standalone installs |
 | `pyside2` | `PySide2>=5.15` | Nuke 15 (PySide2 has no wheels for Python above 3.10) |
+| `ayon` | `ayon-python-api>=1.0`, `keyring>=24` | [Publish to AYON](ayon-publish.md) outside an AYON-launched Nuke; `launch_studio.bat` and `build.bat` install it |
 | `dev` | `ruff>=0.6` | Linting |
 
 ```powershell

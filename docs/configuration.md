@@ -83,12 +83,13 @@ Loading also fails when `extension_groups` is not an object, names an unknown gr
 | --- | --- | --- | --- |
 | [`libraries`](#libraries) | list of objects | `[]` | Libraries shown in the browser. |
 | `colorspaces` | list of strings | `["ACES - ACEScg"]` | Main color space choices in the ingest form. Use OCIO names from the profiles' OCIO config. |
+| `transcode_main` | object | `{"extension": "exr", "compression": "dwaa", "start_frame": 1001, "output_colorspace": "ACEScg"}` | Defaults of the ingest form's [Transcode main](user-guide.md#transcode-main) fields; any key can be left out. |
 | [`extension_groups`](#extension_groups) | object | built-in groups | Override the file extensions of the predefined groups. |
 | [`tools`](#tools) | object of paths | `{}` | External executables. Prefer `[tools]` in `tinylib.ini`, which overrides this. |
 | [`profiles`](#profiles) | object | `{}` | Processing profiles offered at ingest. |
 | [`deadline`](#deadline) | object | `{}` | Deadline submission. |
 | `action_roots` | list of folder paths | `["{app}/actions"]` | Folders of action packages; see [action packages](actions-and-access.md#action-packages). |
-| `tile_template` | string | `{name}\n{type} · {width} × {height}` | Initial tile caption template. A user's own **Tile text…** setting wins. An invalid template falls back to the default. Tokens are listed in the [user guide](user-guide.md#tile-text). |
+| `tile_template` | string | `{name}\n{width} × {height} {length} s` | Initial tile caption template. A user's own **Tile text…** setting wins. An invalid template falls back to the default. Tokens are listed in the [user guide](user-guide.md#tile-text). |
 | `player_backend` | `"interactive"` or `"ffplay"` | `"interactive"` | `"ffplay"` launches the external ffplay player instead of the built-in review player. Any other value means interactive. |
 | `pano_max_width` | integer | `8192` | Widest main or highres the [360 viewer](user-guide.md#360-viewer) shows unreduced. A wider one is downsized by a whole number (16384 → 8192). Each 8192 × 4096 main uses about 130 MB of graphics memory. |
 | `library_defaults` | object | `{}` | Starting entry for **Create new library…** with "Studio defaults", for example `{"read_only": false, "legacy_roots": []}`. Copied as written; name and root come from the dialog. |
@@ -131,6 +132,7 @@ Set tools in the `[tools]` section of [`tinylib.ini`](#tinylibini). Because that
 | `oiiotool` | `oiiotool` | Color conversion of image files; probing images and sequences; reading a main the 360 viewer's FFmpeg cannot read without converting it. |
 | `vfx_transcode` | `vfx-transcode` | Proxies, thumbnails and filmstrips of EXR image sequences; see `proxy_backend` under [profiles](#profiles). When it is not found on a worker, that worker uses the built-in path. Needs version 2026.09 or newer. |
 | `ffplay` | `ffplay` beside `ffmpeg`, else `ffplay` on PATH | Only with `"player_backend": "ffplay"`. |
+| `ayon_console` | beside `AYON_EXECUTABLE` | The AYON launcher console (`ayon_console.exe`) that runs [Publish to AYON](ayon-publish.md). Needed outside a host started from AYON. |
 | `ocio` | the profile's `ocio_config` | OCIO config file for every processing profile on this machine; overrides `ocio_config`. A path, or a built-in config such as `ocio://studio-config-latest` (OCIO 2.2+). Set it on farm workers that have no `OCIO` environment variable. |
 
 The farm worker uses the tools from **its own** `tinylib.ini` (and configuration), never from the job manifest. External tools time out: probes after 60 seconds, each conversion step after one hour.

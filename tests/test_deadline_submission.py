@@ -69,7 +69,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 from tinylib.ingest import (DeadlineSubmissionError, WebServiceUnavailable, _web_service_submit,
-                            submit_deadline, submit_deadline_batch)
+                            submit_deadline, submit_deadline_batch, submit_deadline_jobs)
 
 
 class FakeWebService:
@@ -190,6 +190,33 @@ class WebServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'may already exist') as caught:
             _web_service_submit(web, {}, {}, timeout=.2)
         self.assertNotIsInstance(caught.exception, WebServiceUnavailable)
+
+    def ready_jobs(self):
+        return [('publish_%d' % i, {'Plugin': 'CommandLine', 'Name': 'Publish %d' % i},
+                 {'Executable': 'C:/AYON/ayon_console.exe', 'Arguments': 'addon x'}) for i in range(2)]
+
+    def test_ready_made_jobs_go_to_the_web_service(self):
+        folder = Path(self.temp.name) / 'jobs'
+        identifiers = submit_deadline_jobs(self.ready_jobs(), self.settings, folder)
+        self.assertEqual(identifiers, ['%024x' % 1, '%024x' % 2])
+        body = self.service.requests[0][2]
+        self.assertEqual((body['JobInfo']['Plugin'], body['JobInfo']['UserName']), ('CommandLine', 'artist'))
+        self.assertEqual(body['PluginInfo']['Executable'], 'C:/AYON/ayon_console.exe')
+        self.assertIn('Executable=C:/AYON/ayon_console.exe', (folder / 'publish_1.plugin').read_text())
+
+    def test_ready_made_jobs_fall_back_to_one_deadlinecommand_call(self):
+        self.service.close()
+        self.service = FakeWebService(fail_after=1)
+        self.settings['deadline']['web_service']['url'] = self.service.url
+        folder = Path(self.temp.name) / 'jobs'
+        with self.deadlinecommand('Result=Success\nJobID=abc\n') as popen:
+            identifiers = submit_deadline_jobs(self.ready_jobs(), self.settings, folder)
+        self.assertEqual(identifiers, ['%024x' % 1, 'abc'])
+        command = popen.call_args.args[0]
+        self.assertEqual(command[:2], ['deadlinecommand', '-SubmitMultipleJobs'])
+        self.assertEqual(command[2:], ['-job', str(folder / 'publish_1.job'), str(folder / 'publish_1.plugin')])
+        with self.assertRaises(ValueError):
+            submit_deadline_jobs([('bad', {'Name': 'a\nb'}, {})], self.settings, folder)
 
     def test_batch_falls_back_for_remaining_jobs(self):
         self.service.close()

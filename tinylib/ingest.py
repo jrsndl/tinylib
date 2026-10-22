@@ -157,6 +157,42 @@ def category_for(category, source):
 
 
 PAIRED_ROLES = ('proxy', 'highres', 'thumb', 'filmstrip')
+# Transcode Main: file type -> oiiotool data type of the new image sequence.
+TRANSCODE_TYPES = {'exr': 'half', 'tif': 'uint16', 'tiff': 'uint16', 'png': 'uint16', 'dpx': 'uint10'}
+TRANSCODE_DEFAULTS = {'extension': 'exr', 'compression': 'dwaa', 'start_frame': 1001, 'output_colorspace': 'ACEScg',
+                      'copy_source': True}
+
+
+def transcode_defaults(settings):
+    """Transcode Main defaults: the built-in ones, overridden by ``transcode_main`` in the browser configuration."""
+    values = dict(TRANSCODE_DEFAULTS)
+    values.update({key: value for key, value in (settings.get('transcode_main') or {}).items() if key in values})
+    return values
+
+
+def transcode_options(value):
+    """Checked Transcode Main options (``extension``, ``compression``, ``start_frame``,
+    ``output_colorspace``, ``copy_source``: also keep the original beside the new main, as the
+    ``main-original`` component), or None when ``value`` is empty."""
+    if not value:
+        return None
+    extension = str(value.get('extension', '')).strip().lower().lstrip('.')
+    if extension not in TRANSCODE_TYPES:
+        raise ValueError('Transcode main: the file type must be one of %s.' % ', '.join(sorted(TRANSCODE_TYPES)))
+    compression = str(value.get('compression', '') or '').strip().lower()
+    if compression and not re.fullmatch(r'[a-z0-9_]+(:\d+)?', compression):
+        raise ValueError('Transcode main: invalid compression %r (e.g. dwaa, dwaa:45, zip, piz).' % compression)
+    try:
+        start = int(value.get('start_frame'))
+    except (TypeError, ValueError):
+        raise ValueError('Transcode main: the start frame must be a whole number.')
+    if not 0 <= start <= 9999999:
+        raise ValueError('Transcode main: the start frame must be between 0 and 9999999.')
+    output = str(value.get('output_colorspace', '') or '').strip()
+    if not output:
+        raise ValueError('Transcode main: choose the output color space.')
+    return {'extension': extension, 'compression': compression, 'start_frame': start, 'output_colorspace': output,
+            'copy_source': value.get('copy_source') is True}
 FOLDER_KINDS = ('footage', 'still')
 
 
@@ -291,7 +327,11 @@ def keywords_from_name(name):
 
 
 def make_manifest(settings, library, name, category, source, tags, colorspace,
-                  profile, media, fps=24.0, highres='', preview_source='main', kind='footage', metadata=None):
+                  profile, media, fps=24.0, highres='', preview_source='main', kind='footage', metadata=None,
+                  transcode_main=None):
+    """An ingest job. ``transcode_main`` (Footage only, see ``transcode_options``): the farm
+    converts the main to an image sequence in the output color space, which becomes the
+    asset's main; previews are made from it."""
     access = settings.get('_access') or AccessControl(settings)
     access.refresh()
     access.require(library['root'], 'ingest')
@@ -315,6 +355,18 @@ def make_manifest(settings, library, name, category, source, tags, colorspace,
             raise ValueError('FPS must be between 0 and 240.')
     if kind in ('still', 'footage') and not colorspace.strip():
         raise ValueError('Choose an input color space.')
+    transcode_main = transcode_options(transcode_main)
+    if transcode_main and kind != 'footage':
+        raise ValueError('Transcode main is only available for Footage.')
+    if transcode_main and profile not in settings.get('profiles', {}):
+        raise ValueError('Transcode main needs a configured processing profile (for its OCIO config).')
+    if (transcode_main and transcode_main['copy_source'] and first is not None
+            and Path(pattern).suffix.lower().lstrip('.') == transcode_main['extension']
+            and clean_file_name(source).casefold() == safe_component(name).casefold()):
+        # The copied original would have the transcoded frames' file names.
+        raise ValueError('Copy main source: the original %s and the transcoded main would have the same file '
+                         'names. Give the asset another name, or choose another transcode extension.'
+                         % Path(pattern).name)
     # Scenario 2: a supplied proxy is where thumbnail and filmstrip come from. The argument
     # is kept for older callers; it no longer decides anything.
     preview_source = 'proxy' if media.get('proxy', {}).get('mode') == 'supply' else 'main'
@@ -366,18 +418,22 @@ def make_manifest(settings, library, name, category, source, tags, colorspace,
         'extension_groups': extension_groups(settings),
         'media': media, 'preview_source': preview_source,
         'profile': copy.deepcopy(settings.get('profiles', {}).get(profile, {})), 'profile_name': profile,
-        'tools': copy.deepcopy(settings.get('tools', {}))
+        'tools': copy.deepcopy(settings.get('tools', {})),
+        'transcode_main': transcode_main,
     }
 
 
 def make_folder_manifests(settings, library, category, folder, colorspace, profile,
-                          preview_source='main', progress=None, pairing=None, kind='footage', latlong=False):
+                          preview_source='main', progress=None, pairing=None, kind='footage', latlong=False,
+                          transcode_main=None):
     """Prepare all folder jobs before submitting any of them.
 
     ``category`` is a name or ``{'parent': N}`` (see ``category_for``), resolved per main.
     ``pairing`` pairs proxies, highres, thumbnails and filmstrips with their mains (see
     ``pair_components``). A paired component is supplied; what is missing is generated,
     from the proxy when there is one. A highres is always taken as it is.
+    ``transcode_main`` (Footage): transcode the mains that are not image sequences
+    (containers such as MOV and MP4); sequences are ingested as they are.
     ``kind`` is ``footage`` or ``still``. ``latlong`` marks every still lat-long (HDRI):
     then only EXR and HDR files are mains.
     ``pairing['use']`` sets per preview (proxy, thumb, filmstrip) how it is made: ``auto``
@@ -427,10 +483,12 @@ def make_folder_manifests(settings, library, category, folder, colorspace, profi
             media = {key: ({'mode': 'supply', 'path': components[key]}
                            if key in components and use[key] != 'generate'
                            else {'mode': 'generate', 'path': ''}) for key in previews}
+            sequence = split_sequence(source)[1] is not None
             jobs.append(make_manifest(settings, library, name, category_for(category, source), source,
                                       keywords_from_name(name), colorspace, profile, media,
                                       fps=fps, highres=components.get('highres', ''),
-                                      kind=kind, metadata=metadata))
+                                      kind=kind, metadata=metadata,
+                                      transcode_main=None if still or sequence else transcode_main))
         except Exception as error:
             raise ValueError('Cannot prepare %s (%s): %s. No folder jobs have been submitted.'
                              % (name, source, error)) from error
@@ -720,3 +778,46 @@ def submit_deadline_batch(manifests, settings, progress=None, submitted=None):
         results.append((identifier, path))
         submitted(manifest, identifier, path)
     return results
+
+
+def submit_deadline_jobs(jobs, settings, folder, progress=None):
+    """Submit ready-made Deadline jobs that are not ingests (actions use this).
+
+    ``jobs`` is ``[(file_stem, job_info, plugin_info), ...]``; the .job and .plugin files are
+    written into ``folder`` (kept for manual resubmission). Like ingest submission: the Web
+    Service first when configured (one request per job), else, and for every job the Web
+    Service did not take, one ``deadlinecommand -SubmitMultipleJobs`` call. Returns the job
+    IDs in job order.
+    """
+    report = progress or (lambda message: None)
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for stem, job_info, plugin_info in jobs:
+        for value in list(job_info.values()) + list(plugin_info.values()):
+            if '\n' in str(value) or '\r' in str(value):
+                raise ValueError('Invalid line break in a Deadline job value.')
+        path = folder / stem
+        for suffix, info in (('.job', job_info), ('.plugin', plugin_info)):
+            path.with_suffix(suffix).write_text(''.join('%s=%s\n' % item for item in info.items()), encoding='utf-8')
+        paths.append(path)
+    identifiers = []
+    web = _web_service(settings)
+    if web:
+        try:
+            for index, (stem, job_info, plugin_info) in enumerate(jobs, 1):
+                report('Job %d/%d: submitting through the Deadline Web Service…' % (index, len(jobs)))
+                identifiers.append(_web_service_submit(
+                    web, dict(job_info, UserName=str(web.get('user') or getpass.getuser())), plugin_info))
+            return identifiers
+        except WebServiceUnavailable as error:
+            log.warning('Deadline Web Service failed (%s); submitting %d remaining job(s) with deadlinecommand.',
+                        error, len(jobs) - len(identifiers))
+            report('Web Service failed (%s); using deadlinecommand…' % error)
+    remaining = paths[len(identifiers):]
+    command = [settings.get('deadline', {}).get('command') or 'deadlinecommand', '-SubmitMultipleJobs']
+    for path in remaining:
+        command += ['-job', str(path.with_suffix('.job')), str(path.with_suffix('.plugin'))]
+    report('Submitting %d job(s) with deadlinecommand…' % len(remaining))
+    job_ids, _, _ = _run_deadline(command, report, timeout=60 + 5 * len(remaining), expected=len(remaining))
+    return identifiers + job_ids

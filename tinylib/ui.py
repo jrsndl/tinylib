@@ -7,7 +7,7 @@ import threading
 import time
 from .qt import QtCore, QtGui, QtWidgets, HOSTED_IN_NUKE, exec_dialog
 from .settings import load_settings
-from .preferences import Preferences, adjacent_asset, asset_key, COLLECTION_MIME
+from .preferences import Preferences, adjacent_asset, asset_key, display_value, tile_template, COLLECTION_MIME
 from .filters import accepts
 from .collection_ui import CollectionsPanel
 from .views import (stylesheet, Loader, ImageCache, AssetModel, Grid, DetailsView,
@@ -17,13 +17,14 @@ from .access_ui import AccessDialog
 from .actions import ActionRegistry
 from .action_ui import ActionPicker
 from .player import Player
-from .tile_text import DEFAULT_TEMPLATE, TOKENS, validate_template
+from .tile_text import TOKENS, validate_template
 from .properties_ui import PropertiesEditor
 from .asset_edit import DeleteStopped, writable_library, save_asset, save_assets, delete_assets
 from .delete_ui import DeleteDialog
 from .edit_lock import (LibraryEditLocked, acquire_edit_lock, locked_message,
                         release_edit_lock)
-from .path_format import FORMATS, format_assets
+from .path_format import format_assets
+from .preferences_ui import PreferencesDialog
 from .asset_types import ASSET_TYPES
 from .asset_fields import display_name
 from .library import Library
@@ -339,6 +340,8 @@ class Browser(QtWidgets.QWidget):
         self.user_info = user_menu.addAction('')
         self.user_info.setEnabled(False)
         user_menu.addSeparator()
+        self.preferences_action = user_menu.addAction('Preferences…')
+        self.preferences_action.triggered.connect(self.edit_preferences)
         # Admins only: use TinyLib as another user would, until Log out.
         self.login_as_action = user_menu.addAction('Login as…')
         self.login_as_action.triggered.connect(self.login_as)
@@ -368,15 +371,10 @@ class Browser(QtWidgets.QWidget):
         self.cache.activity.connect(self.preview_progress)
         self.grid = Grid(self.cache)
         display = self.preferences.data.get('display', {})
-        template = display.get('tile_template', self.settings.get('tile_template', DEFAULT_TEMPLATE))
-        try:
-            validate_template(template)
-        except ValueError:
-            template = DEFAULT_TEMPLATE
-        self.grid.cards.template = template
+        self.grid.cards.template = tile_template(display, self.settings)
         self.grid.cards.info = self.info_toggle.isChecked()
         self.model = AssetModel(self)
-        self.model.path_notation = self.preferences.data.get('display', {}).get('path_notation', 'nuke')
+        self.model.path_notation = display_value(display, 'path_notation')
         self.model.trim_for = self.preferences.trim  # The user's own in/out points.
         self.grid.setModel(self.model)
         self.table = DetailsView(self.grid.cards)
@@ -413,6 +411,8 @@ class Browser(QtWidgets.QWidget):
         self.splitter.setSizes([190, 1000, 0, 300])
         self.details_panel.setVisible(self.details_toggle.isChecked())
         self.details_toggle.toggled.connect(self.toggle_details)
+        if display_value(self.preferences.data.get('display', {}), 'start_collections'):
+            self.collection_toggle.setChecked(True)
         layout.addWidget(self.splitter, 1)
         self.status = QtWidgets.QLabel('Loading libraries…')
         self.status.setObjectName('muted')
@@ -439,6 +439,7 @@ class Browser(QtWidgets.QWidget):
         for widget in (self.length_filter, self.width_filter, self.stars_filter):
             widget.changed.connect(self.filter)
         self.categories.itemSelectionChanged.connect(self.filter)
+        self.categories.itemSelectionChanged.connect(self.remember_category)
         self.grid.selectionModel().selectionChanged.connect(self.main_selection)
         self.grid.selectionModel().currentChanged.connect(self.main_selection)
         for widget in (self.grid, self.grid.viewport(), self.table, self.table.viewport(),
@@ -508,15 +509,6 @@ class Browser(QtWidgets.QWidget):
         self.play_button.setCheckable(True)
         self.play_button.toggled.connect(self.set_play_all)
         row.addWidget(self.play_button)
-        row.addWidget(QtWidgets.QLabel('Paths'))
-        self.path_notation = QtWidgets.QComboBox()
-        for identifier, label in FORMATS:
-            self.path_notation.addItem(label, identifier)
-        selected_format = self.preferences.data.get('display', {}).get('path_notation', 'nuke')
-        self.path_notation.setCurrentIndex(max(0, self.path_notation.findData(selected_format)))
-        self.path_notation.currentIndexChanged.connect(self.change_path_notation)
-        self.path_notation.setToolTip('File-sequence notation used for external drags and clipboard copy.')
-        row.addWidget(self.path_notation)
         row.addStretch()
         self.collection_toggle = QtWidgets.QPushButton('Collections')
         self.collection_toggle.setCheckable(True)
@@ -524,15 +516,16 @@ class Browser(QtWidgets.QWidget):
         row.addWidget(self.collection_toggle)
         self.details_toggle = QtWidgets.QPushButton('Properties')
         self.details_toggle.setCheckable(True)
-        self.details_toggle.setChecked(self.preferences.data.get('display', {}).get('details_panel', True))
-        self.details_toggle.setToolTip('Show or hide the asset properties panel.')
+        self.details_toggle.setChecked(display_value(self.preferences.data.get('display', {}), 'start_properties'))
+        self.details_toggle.setToolTip('Show or hide the asset properties panel. Whether it shows when TinyLib\n'
+                                       'starts is set in Preferences (user menu).')
         row.addWidget(self.details_toggle)
         self.caption_button = QtWidgets.QPushButton('Tile text…')
         self.caption_button.clicked.connect(self.configure_tile_text)
         row.addWidget(self.caption_button)
         self.info_toggle = QtWidgets.QPushButton('Info')
         self.info_toggle.setCheckable(True)
-        self.info_toggle.setChecked(self.preferences.data.get('display', {}).get('tile_info', True))
+        self.info_toggle.setChecked(display_value(self.preferences.data.get('display', {}), 'tile_info'))
         self.info_toggle.toggled.connect(self.toggle_tile_info)
         row.addWidget(self.info_toggle)
         layout.addLayout(row)
@@ -722,6 +715,11 @@ class Browser(QtWidgets.QWidget):
             asset['_rating'] = self.preferences.rating(asset)
         current = self.categories.currentItem()
         selected_scope = current.data(0, QtCore.Qt.UserRole) if current else ('', '')
+        display = self.preferences.data.get('display', {})
+        last = display.get('last_category')
+        if (current is None and display_value(display, 'remember_category') and isinstance(last, list)
+                and len(last) == 2 and all(isinstance(part, str) for part in last)):
+            selected_scope = tuple(last)  # The first load opens where the user left off.
         self.categories.blockSignals(True)
         self.categories.clear()
         all_item = QtWidgets.QTreeWidgetItem(['All libraries'])
@@ -1311,22 +1309,63 @@ class Browser(QtWidgets.QWidget):
         except Exception as error:
             self.show_error(str(error))
 
-    def change_path_notation(self, *_):
-        notation = self.path_notation.currentData()
-        if hasattr(self, 'model'):
-            self.model.path_notation = notation
-        if hasattr(self, 'collections'):
-            self.collections.model.path_notation = notation
+    def set_path_notation(self, notation):
+        """The file-sequence notation for drags, Ctrl+C and Copy paths (Preferences)."""
+        self.model.path_notation = notation
+        self.collections.model.path_notation = notation
         try:
             self.preferences.set_display(path_notation=notation)
         except Exception as error:
             self.show_error(str(error))
 
+    def preference_values(self):
+        display = self.preferences.data.get('display', {})
+        values = {key: display_value(display, key) for key in
+                  ('path_notation', 'start_properties', 'start_collections', 'remember_category', 'tile_info')}
+        values['tile_info'] = self.info_toggle.isChecked()
+        values['tile_template'] = self.grid.cards.template
+        return values
+
+    def edit_preferences(self):
+        dialog = PreferencesDialog(self.preference_values(), self)
+        if not exec_dialog(dialog):
+            return
+        values = dialog.values()
+        try:
+            changes = {key: values[key] for key in ('start_properties', 'start_collections', 'remember_category')}
+            if values['tile_template'] != self.grid.cards.template:
+                changes['tile_template'] = values['tile_template']  # Unchanged, the studio's stays in charge.
+            self.preferences.set_display(**changes)
+            if values['remember_category']:
+                self.remember_category()
+        except Exception as error:
+            self.show_error(str(error))
+        if values['path_notation'] != self.model.path_notation:
+            self.set_path_notation(values['path_notation'])
+        self.info_toggle.setChecked(values['tile_info'])  # Saves tile_info.
+        if values['tile_template'] != self.grid.cards.template:
+            self.grid.cards.template = values['tile_template']
+            self.grid.doItemsLayout()
+            self.grid.viewport().update()
+
+    def remember_category(self, *_):
+        """Keep the selected library or category for the next start (Preferences: Remember library and category)."""
+        if self._filtering or not display_value(self.preferences.data.get('display', {}), 'remember_category'):
+            return
+        current = self.categories.currentItem()
+        scope = list(current.data(0, QtCore.Qt.UserRole)) if current else ['', '']
+        if scope == self.preferences.data.get('display', {}).get('last_category'):
+            return
+        try:
+            self.preferences.set_display(last_category=scope)
+        except Exception:
+            pass  # A convenience: never interrupt browsing for it.
+
     def copy_selected_paths(self):
         assets = self.selected_assets()
         if not assets:
             return
-        QtWidgets.QApplication.clipboard().setText(format_assets(assets, self.path_notation.currentData(),
+        QtWidgets.QApplication.clipboard().setText(format_assets(assets, self.model.path_notation,
                                                                  self.trim_source(self.selection_source == 'collection')))
         self.status.setText('Copied %d asset path%s.' % (len(assets), '' if len(assets) == 1 else 's'))
 
@@ -1390,11 +1429,8 @@ class Browser(QtWidgets.QWidget):
             self.selection()
 
     def toggle_details(self, enabled):
+        # For this session only; Preferences decides whether it shows on start.
         self.details_panel.setVisible(enabled)
-        try:
-            self.preferences.set_display(details_panel=enabled)
-        except Exception as error:
-            self.show_error(str(error))
 
     def collections_changed(self):
         self.filter()

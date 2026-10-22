@@ -1,0 +1,6 @@
+{
+  "id": "ayon.publish", "name": "Publish to AYON", "version": "1.0.0",
+  "category": "AYON", "entrypoint": "action.py", "config": "config.json",
+  "hosts": ["nuke", "standalone"],
+  "asset_filter": {"kinds": ["footage", "still"], "requires": ["main", "thumb"], "min_selection": 1}
+}

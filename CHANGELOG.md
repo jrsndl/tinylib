@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Ingest
+
+- **Transcode main** for Footage: the farm converts the main to an image sequence that becomes the asset's main, for stock footage received as Rec.709 MOV or MP4. Fields: extension (`exr`), compression (`dwaa`), start frame (`1001`) and output color space (`ACEScg`). It is ticked automatically when the main is not an image sequence; in a folder batch it applies to the mains that are not sequences. FFmpeg decodes a movie to 16-bit frames, oiiotool converts them from the main color space with the profile's OCIO config. Studio defaults: `transcode_main` in the browser configuration.
+- **Main color space** moves up, just below **Main** in the ingest form.
+- Transcode main: **Copy main source** (on by default) also keeps the original file or sequence unchanged in the asset's main folder, recorded as the new **main-original** part (Footage). An alpha channel in the main is detected (ffprobe pixel format) and kept: RGBA frames, color converted unpremultiplied.
+- Fixed: footage processing failed with FFmpeg 8 and newer (`Unrecognized option 'vsync'`); it uses `-fps_mode`, and `-vsync` only on FFmpeg older than 5.1.
+
+### Actions
+
+- New bundled action **Publish to AYON** (`ayon.publish`, category AYON), in Nuke and standalone: publishes the selected footage (product type `render`) and stills (`image`) to a picked AYON folder and task, through AYON's traypublisher CSV ingest. Its **Components** section chooses which of main, proxy and highres become representations (main and proxy by default), with each one's representation name, tags and colour space; the thumbnail is the version thumbnail. Each asset's variant (default: its name), version (default: its version number, or 1) and comment are editable. In Nuke started from AYON it uses the session's AYON credentials and context; otherwise you sign in to AYON in the window (session token kept in the Windows Credential Manager). With ftrack credentials (environment or sign-in) the reviewable is also published to ftrack; without them the `ftrackreview` tag is left out. See [docs/ayon-publish.md](docs/ayon-publish.md).
+- Publish to AYON has **Deadline Publish** (the ingest command runs as Deadline CommandLine jobs, submitted through the Web Service or `deadlinecommand` like ingests, with the CSV files in a farm-readable folder) and **Each Asset Separate** (one CSV file and one publish or job per asset). New config keys `deadline_csv_folder`, `deadline_ayon_executable`, `deadline_send_credentials`, `deadline_environment` and `deadline`.
+- New `ayon` extra (`ayon-python-api`, `keyring`) for the action outside AYON; `launch_studio.bat` and `build.bat` install it, and `TinyLib.exe` includes it. New `[tools]` key `ayon_console`.
+
 ### Library tools
 
 - **Keyword cleaner…** cleans the keywords of one library, or only of its selected assets: removes number-only keywords and applies three whole-keyword replacements (empty removes, commas split), and adds comma-separated keywords to every asset in scope, with a live preview.
@@ -36,6 +49,8 @@
 
 ### Interface
 
+- **Preferences…** in the user menu: Paths (moved there from the main view's controls; default Nuke), Show Properties panel on start (on), Show Collections panel on start (off), Remember library and category (on: TinyLib opens on the library or category selected last time), Show Info (on) and Tile text. The Properties button no longer saves its state; the start setting decides.
+- The default tile text is `{name}\n{width} × {height} {length} s` (was `{name}\n{type} · {width} × {height}`). A tile text you or the studio set is kept.
 - A user menu in the bottom-left corner shows your login name without the domain (e.g. `jan` for `studio\jan`); it lists your full account and groups. For administrators it holds **Library tools**, which moved there from beneath the library tree.
 - Admins can **Login as…** another user from the user menu: TinyLib then behaves as it does for that user until **Log out** in the same menu. Edit locks, ingests and the log record both accounts (`studio\admin as studio\jan`).
 - The action dropdowns remember the last action you picked, in your user preferences (`last_action` for the properties panel, `last_collection_action` for the collection panel). It is preselected whenever it is available for what the dropdown would run on.

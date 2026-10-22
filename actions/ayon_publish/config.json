@@ -1,0 +1,26 @@
+{
+  "_help": "See docs/ayon-publish.md. Keys starting with _ are ignored.",
+  "ayon_server_url": "",
+  "ftrack_server": "",
+  "ayon_executable": "",
+  "preset": "Default",
+  "ignore_validators": true,
+  "csv_folder_path": "",
+  "csv_task": "",
+  "components": [
+    {"enabled": true, "component": "main", "representation": "{extension}", "tags": "passing", "colorspace": "ACEScg"},
+    {"enabled": true, "component": "proxy", "representation": "{extension}", "tags": "passing;ftrackreview;webreview", "colorspace": "Output - Rec.709"},
+    {"enabled": false, "component": "highres", "representation": "{extension}", "tags": "passing", "colorspace": "ACEScg"}
+  ],
+  "ftrack_review_tag": "ftrackreview",
+  "colorspace_map": {},
+  "default_fps": 25.0,
+  "still_frame": 1,
+  "comment": "TinyLib: {library} / {name}",
+  "log_folder": "",
+  "deadline_csv_folder": "",
+  "deadline_ayon_executable": "",
+  "deadline_send_credentials": true,
+  "deadline_environment": {},
+  "deadline": {}
+}

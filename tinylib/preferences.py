@@ -7,6 +7,8 @@ import uuid
 from pathlib import Path
 from .library import atomic_json, library_lock, read_json
 from .trim import clean_trim, stored_trim
+from .path_format import FORMAT_IDS
+from .tile_text import DEFAULT_TEMPLATE, validate_template
 
 ASSET_MIME = 'application/x-tinylib-asset-keys'
 COLLECTION_MIME = 'application/x-tinylib-collection-selection'
@@ -37,6 +39,38 @@ def adjacent_asset(assets, asset, step):
 def reference(asset):
     return {key: asset.get(key, '') for key in
             ('name', 'library', 'library_root', 'main', 'id', 'kind', 'category', 'thumb')}
+
+
+# Display preferences (the Preferences window): key in the "display" section -> default.
+DISPLAY_DEFAULTS = {
+    'path_notation': 'nuke',
+    'start_properties': True,
+    'start_collections': False,
+    'remember_category': True,
+    'tile_info': True,
+}
+
+
+def display_value(display, key):
+    """A display preference, or its default when unset or of the wrong type."""
+    default = DISPLAY_DEFAULTS[key]
+    value = display.get(key, default)
+    if key == 'path_notation':
+        return value if value in FORMAT_IDS else default
+    return value if isinstance(value, bool) else default
+
+
+def tile_template(display, settings):
+    """The user's tile text, else the studio's tile_template, else the default; invalid ones fall back."""
+    for template in (display.get('tile_template'), settings.get('tile_template')):
+        if template is None:
+            continue
+        try:
+            validate_template(template)
+            return template
+        except ValueError:
+            continue
+    return DEFAULT_TEMPLATE
 
 
 class Preferences:

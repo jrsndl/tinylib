@@ -6,13 +6,14 @@ if errorlevel 1 exit /b 1
 rem The browser configuration comes from tinylib.ini (config =), unless
 rem TINYLIB_CONFIG is already set. The security file always comes from tinylib.ini.
 
-rem With uv, first install whatever pyproject.toml asks for and .venv lacks (PySide6, numpy),
+rem With uv, first install whatever pyproject.toml asks for and .venv lacks (PySide6, numpy,
+rem ayon_api and keyring for Publish to AYON),
 rem so a new dependency never stops the browser. --inexact keeps packages installed by other
 rem syncs (dev tools, the build group). Up to date, this takes a moment and changes nothing.
 rem A folder this account cannot write (a read-only share) keeps its existing environment.
 where uv >nul 2>nul
 if not errorlevel 1 (
-    uv sync --extra pyside6 --inexact --quiet
+    uv sync --extra pyside6 --extra ayon --inexact --quiet
     if errorlevel 1 (
         echo.
         echo uv could not install the Python packages; starting with what is installed.

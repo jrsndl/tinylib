@@ -1,4 +1,8 @@
 
+[ayon]
+ayon-python-api>=1.0
+keyring>=24
+
 [dev]
 ruff>=0.6
 

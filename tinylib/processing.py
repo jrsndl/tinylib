@@ -30,6 +30,30 @@ def run(command, timeout=CONVERSION_TIMEOUT):
     return result.stdout
 
 
+def run_passthrough(command):
+    """Run an FFmpeg ``command`` that contains ``'{fps_mode}', 'passthrough'``.
+
+    FFmpeg 5.1 renamed -vsync to -fps_mode and FFmpeg 8 removed -vsync; -fps_mode is
+    tried first, -vsync only for an older build that does not know it.
+    """
+    try:
+        return run([arg if arg != '{fps_mode}' else '-fps_mode' for arg in command])
+    except RuntimeError as error:
+        if 'fps_mode' not in str(error):
+            raise
+        return run([arg if arg != '{fps_mode}' else '-vsync' for arg in command])
+
+
+# FFmpeg pixel formats with an alpha channel: rgba, rgba64le, bgra, argb, yuva444p10le (ProRes 4444),
+# gbrap, gbrapf32le (EXR RGBA), ya8 / ya16 (grey with alpha), ayuv, vuya, ...
+ALPHA_PIX_FMT = re.compile(r'^(?:rgba|bgra|argb|abgr|yuva|gbrap|ya\d|ayuv|vuya|uyva)')
+
+
+def has_alpha(stream):
+    """Whether an ffprobe video stream has an alpha channel (from its pixel format)."""
+    return bool(ALPHA_PIX_FMT.match(str(stream.get('pix_fmt') or '').lower()))
+
+
 def sample_indices(count, samples=24):
     if count < 1:
         raise ValueError('Cannot sample empty media.')
@@ -208,8 +232,8 @@ class Processor:
         if container:
             pngs = temp / 'png'
             pngs.mkdir()
-            run([self.ffmpeg, '-y', '-v', 'error', '-i', sources[0], '-map', '0:v:0',
-                 '-vf', 'scale=%d:%d:flags=lanczos,setsar=1' % size, '-vsync', 'passthrough',
+            run_passthrough([self.ffmpeg, '-y', '-v', 'error', '-i', sources[0], '-map', '0:v:0',
+                 '-vf', 'scale=%d:%d:flags=lanczos,setsar=1' % size, '{fps_mode}', 'passthrough',
                  '-pix_fmt', 'rgb48be', '-start_number', '1001', str(pngs / 'frame.%08d.png')])
             count = len(list(pngs.glob('frame.*.png')))
             if not count:
@@ -228,6 +252,71 @@ class Processor:
         if len(made) != last - first + 1:
             raise ValueError('oiiotool wrote %d of %d scene-linear frames.' % (len(made), last - first + 1))
         return made
+
+    def transcode_main(self, sources, target, name):
+        """Transcode Main: the main becomes an image sequence in the output color space.
+
+        A container (MOV, MP4…) is decoded by FFmpeg to full-size 16-bit PNGs numbered
+        from the start frame; an image sequence is read as it is. oiiotool converts every
+        frame from the main color space to the output color space in one
+        ``--parallel-frames`` run (EXR: half float with the chosen compression) and the
+        frames are moved into ``target`` as ``<name>.<frame>.<extension>``, renumbered from
+        the start frame. Returns (frames, file name pattern, first, last).
+
+        A main with an alpha channel (ffprobe's pixel format, e.g. ProRes 4444) keeps it:
+        RGBA is decoded and written, and the color is converted unpremultiplied, so the
+        alpha is unchanged and EXR frames are premultiplied as EXR expects.
+        """
+        from .ingest import TRANSCODE_TYPES
+        options = self.job['transcode_main']
+        extension, start = options['extension'], int(options['start_frame'])
+        oiiotool = self.tools.get('oiiotool', 'oiiotool')
+        ocio = self.ocio_config()  # fail before decoding anything
+        groups = extension_groups({'extension_groups': self.job.get('extension_groups', {})})
+        container = len(sources) == 1 and sources[0].suffix.lower().lstrip('.') in groups['extensions_footage_containers']
+        alpha = has_alpha(probe(sources[0], self.tools))
+        if alpha:
+            print('Transcode main: %s has an alpha channel; it is kept.' % sources[0].name, flush=True)
+        temp = Path(tempfile.mkdtemp(prefix='tinylib-transcode-'))
+        try:
+            if container:
+                pngs = temp / 'png'
+                pngs.mkdir()
+                print('Transcode main: decoding %s' % sources[0].name, flush=True)
+                run_passthrough([self.ffmpeg, '-y', '-v', 'error', '-i', sources[0], '-map', '0:v:0', '{fps_mode}', 'passthrough',
+                     '-pix_fmt', 'rgba64be' if alpha else 'rgb48be', '-start_number', str(start),
+                     str(pngs / 'frame.%08d.png')])
+                count = len(list(pngs.glob('frame.*.png')))
+                if not count:
+                    raise ValueError('FFmpeg decoded no frames from ' + str(sources[0]))
+                pattern, first, last = pngs / 'frame.%08d.png', start, start + count - 1
+            else:
+                pattern, first, last = printf_pattern(sources[0]), frame_number(sources[0]), frame_number(sources[-1])
+            converted = temp / 'out'
+            converted.mkdir()
+            args = [oiiotool, '--colorconfig', ocio, '--parallel-frames', '--frames', '%d-%d' % (first, last),
+                    str(pattern), '--ch', 'R,G,B,A' if alpha else 'R,G,B',
+                    '--colorconvert:unpremult=1' if alpha else '--colorconvert',
+                    self.job['colorspace'], options['output_colorspace']]
+            if options.get('compression'):
+                args += ['--compression', options['compression']]
+            args += ['-d', TRANSCODE_TYPES[extension], '-o', str(converted / ('frame.%08d.' + extension))]
+            print('Transcode main: %d frames to %s %s' % (last - first + 1, extension, options['output_colorspace']),
+                  flush=True)
+            run(args)
+            made = sorted(converted.glob('frame.*.' + extension), key=frame_number)
+            if len(made) != last - first + 1:
+                raise ValueError('oiiotool wrote %d of %d transcoded frames.' % (len(made), last - first + 1))
+            new_last = start + len(made) - 1
+            padding = max(4, len(str(new_last)))
+            frames = []
+            for index, frame in enumerate(made):
+                destination = Path(target) / ('%s.%0*d.%s' % (name, padding, start + index, extension))
+                shutil.move(str(frame), str(destination))
+                frames.append(destination)
+            return frames, '%s.%s.%s' % (name, '#' * padding, extension), start, new_last
+        finally:
+            shutil.rmtree(temp, ignore_errors=True)
 
     def vfx_transcode(self, sources, outputs):
         """Generate footage's proxy, thumbnail and filmstrip in one vfx-transcode run.
@@ -554,9 +643,11 @@ def process(manifest_path, access=None, settings=None):
         sources = [] if job['kind'] == 'folder' else sequence_files(job['source'])
         main_dir = stage / 'main'
         main_dir.mkdir()
+        transcode = job.get('transcode_main') if job['kind'] == 'footage' else None
+        original_main = ''  # Copy main source: the original's file name (and range) in main/
         if job['kind'] == 'folder':
             shutil.copytree(source_path, main_dir, dirs_exist_ok=True)
-        else:
+        elif not transcode:  # A transcoded main is written by the processor below.
             for source in sources:
                 shutil.copy2(source, main_dir / source.name)
         highres_pattern = ''
@@ -586,11 +677,25 @@ def process(manifest_path, access=None, settings=None):
                 else:
                     shutil.copy2(supplied, outputs[key])
         processor = None
+        pattern, first, last = split_sequence(job['source'])
         if job['kind'] in ('still', 'footage'):
             processor = Processor(job, work)
+            if transcode:
+                originals = sources
+                sources, pattern, first, last = processor.transcode_main(sources, main_dir, name)
+                # From here on the main is the new sequence, in its own color space.
+                job['colorspace'] = transcode['output_colorspace']
+                if transcode.get('copy_source'):
+                    # Copy main source: the original beside the new main, as the main-original component.
+                    for source in originals:
+                        if (main_dir / source.name).exists():
+                            raise ValueError('Copy main source: %s has the name of a transcoded frame.' % source.name)
+                        shutil.copy2(source, main_dir / source.name)
+                    original_pattern, original_first, original_last = split_sequence(job['source'])
+                    original_main = Path(original_pattern).name + (
+                        ' %d-%d' % (original_first, original_last) if original_first is not None else '')
             processor.generate([main_dir / p.name for p in sources], outputs)
         validate_media(outputs, job)
-        pattern, first, last = split_sequence(job['source'])
         destination = root / category / name
         metadata = dict(job.get('metadata', {}))
         if job['kind'] in ('still', 'footage'):
@@ -621,6 +726,8 @@ def process(manifest_path, access=None, settings=None):
                       metadata=metadata)
         from .asset_fields import apply_defaults
         apply_defaults(record)
+        if original_main:
+            record['main-original'] = str(destination / 'main' / original_main)
         record['ingest_user'] = job.get('ingest_user', 'unknown')
         record['ingest_date'] = job.get('ingest_date', '')
         for key, path in outputs.items():

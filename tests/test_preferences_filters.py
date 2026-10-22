@@ -2,7 +2,8 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-from tinylib.preferences import Preferences, asset_key
+from tinylib.preferences import Preferences, asset_key, display_value, tile_template
+from tinylib.tile_text import DEFAULT_TEMPLATE
 from tinylib.filters import accepts, duration
 
 
@@ -143,6 +144,26 @@ class PreferenceTests(unittest.TestCase):
         self.assertIn('reset', recovered.warning)
         aside = list(self.path.parent.glob('preferences.damaged-*.json'))
         self.assertEqual([item.read_text() for item in aside], ['invalid'])
+
+
+class DisplayPreferenceTests(unittest.TestCase):
+    def test_defaults_and_wrong_values_fall_back(self):
+        self.assertEqual(display_value({}, 'path_notation'), 'nuke')
+        self.assertEqual(display_value({'path_notation': 'flame'}, 'path_notation'), 'flame')
+        self.assertEqual(display_value({'path_notation': 'nonsense'}, 'path_notation'), 'nuke')
+        self.assertIs(display_value({}, 'start_properties'), True)
+        self.assertIs(display_value({}, 'start_collections'), False)
+        self.assertIs(display_value({}, 'remember_category'), True)
+        self.assertIs(display_value({}, 'tile_info'), True)
+        self.assertIs(display_value({'start_collections': 'yes'}, 'start_collections'), False)
+
+    def test_tile_text_user_then_studio_then_default(self):
+        self.assertEqual(DEFAULT_TEMPLATE, r'{name}\n{width} × {height} {length} s')
+        self.assertEqual(tile_template({}, {}), DEFAULT_TEMPLATE)
+        self.assertEqual(tile_template({}, {'tile_template': '{category}'}), '{category}')
+        self.assertEqual(tile_template({'tile_template': '{fps}'}, {'tile_template': '{category}'}), '{fps}')
+        self.assertEqual(tile_template({'tile_template': '{bad}'}, {'tile_template': '{category}'}), '{category}')
+        self.assertEqual(tile_template({'tile_template': '{bad}'}, {}), DEFAULT_TEMPLATE)
 
 
 class TrimTests(unittest.TestCase):

@@ -28,12 +28,12 @@ if errorlevel 1 (
 )
 
 rem --- environment: PySide6 and PyInstaller from pyproject.toml / uv.lock ------------------------
-echo === uv sync --extra pyside6 --group build
-uv sync --extra pyside6 --group build
+echo === uv sync --extra pyside6 --extra ayon --group build
+uv sync --extra pyside6 --extra ayon --group build
 if errorlevel 1 goto :fail
-uv run python -c "import PySide6, PyInstaller" >nul 2>nul
+uv run python -c "import PySide6, PyInstaller, ayon_api, keyring" >nul 2>nul
 if errorlevel 1 (
-    echo PySide6 or PyInstaller did not install. Run: uv sync --extra pyside6 --group build
+    echo PySide6, PyInstaller, ayon_api or keyring did not install. Run: uv sync --extra pyside6 --extra ayon --group build
     goto :fail
 )
 for /f "delims=" %%V in ('uv run python -c "import tinylib; print(tinylib.__version__)"') do set "VERSION=%%V"
@@ -59,11 +59,13 @@ rem --- freeze: one-folder exe, which starts faster than one-file with Qt inside
 rem All tinylib modules are collected: actions import them by name at run time.
 rem The stylesheet and icons are read from the package folder, so they go in as data.
 rem PySide2 and Nuke are left out; the exe always uses PySide6.
+rem ayon_api and keyring are imported only by the Publish to AYON action, so they are collected by name.
 echo.
 echo === building TinyLib.exe %VERSION%
 uv run python -m PyInstaller --noconfirm --clean --onedir %MODE% --noupx --name TinyLib ^
     --distpath build\dist --workpath "%WORK%" --specpath build ^
     --paths "%CD%" --collect-submodules tinylib ^
+    --collect-submodules ayon_api --collect-submodules keyring ^
     --add-data "%CD%\tinylib\standalone.qss;tinylib" ^
     --add-data "%CD%\tinylib\icons;tinylib\icons" ^
     --exclude-module PySide2 --exclude-module shiboken2 --exclude-module nuke ^

@@ -58,11 +58,11 @@ Selection is kept when switching views. Use Ctrl-click, Shift-click or Ctrl+A fo
 
 `{name}` (the label, if the asset has one), `{ingest_name}` (always the name used at ingest), `{library}`, `{category}`, `{type}`, `{colorspace}`, `{tags}`, `{width}`, `{height}`, `{fps}`, `{length}` (seconds), `{first}`, `{last}`
 
-Example: `{name}\n{width} × {height}`. The default is `{name}\n{type} · {width} × {height}`. Missing values show as `—`. Both settings are saved in your preferences; a studio `tile_template` provides the initial template.
+Example: `{name}\n{type} · {width} × {height}`. The default is `{name}\n{width} × {height} {length} s`. Missing values show as `—`. Both settings are saved in your preferences and can also be set in [Preferences](#preferences); a studio `tile_template` provides the initial template.
 
 ## Paths
 
-**Paths** chooses your file-sequence notation for external drag-and-drop, **Ctrl+C**, collection **Copy**, and the bundled Copy paths action. All output uses forward slashes.
+**Paths**, in [Preferences](#preferences), chooses your file-sequence notation for external drag-and-drop, **Ctrl+C**, collection **Copy**, and the bundled Copy paths action. The default is Nuke. All output uses forward slashes.
 
 | Notation | Example |
 | --- | --- |
@@ -76,13 +76,26 @@ Example: `{name}\n{width} × {height}`. The default is `{name}\n{type} · {width
 
 Stills remain ordinary file paths except in Fallback mode.
 
+## Preferences
+
+**Preferences…** in the user menu (your login name, bottom-left corner) holds your personal display settings, saved in your preferences:
+
+| Setting | Default | |
+| --- | --- | --- |
+| Paths | Nuke | File-sequence notation; see [Paths](#paths). |
+| Show Properties panel on start | on | The **Properties** button still shows or hides it during a session. |
+| Show Collections panel on start | off | The **Collections** button still shows or hides it during a session. |
+| Remember library and category | on | TinyLib opens on the library or category you had selected last time. |
+| Show Info | on | Tile captions; the same as the **Info** button. |
+| Tile text | `{name}\n{width} × {height} {length} s` | The captions; the same as **Tile text…**. **Default tile text** restores the default. |
+
 ## Ratings
 
 Star ratings are personal. The five stars in the top controls set the rating of the whole selection; **Clear** sets zero stars. Mixed ratings show five unfilled stars until you choose a value. With focus in the main view, press **1–5** to rate the selected assets or **0** to clear. The same keys work in the player for its asset.
 
 ## Collections
 
-**Collections** opens a scratchpad between the main view and properties. It starts hidden every time. **Properties**, to its right, shows or hides the asset properties panel; it is on by default, TinyLib remembers your choice, and **Edit** shows the panel again.
+**Collections** opens a scratchpad between the main view and properties. **Properties**, to its right, shows or hides the asset properties panel, and **Edit** shows the panel again. Whether each panel shows when TinyLib starts is set in [Preferences](#preferences): Properties on and Collections off by default.
 
 - Create collections with **New** (collection01, collection02, …), rename or delete them. Deleting a collection never deletes media.
 - Drag a main-view selection onto the collection list. With no collections, the first one is created automatically. Duplicate picks in one collection are ignored.
@@ -153,7 +166,7 @@ The viewer needs OpenGL 3.0. Decoding the main needs numpy, which Nuke and the s
 
 ## Actions and Nuke import
 
-The properties action dropdown runs a studio action on the main-view selection or, with nothing selected, on every asset the main view shows (filtered as it is); its first entry then reads **Pick action for all N shown…**, and running it on more than one asset asks first. The collection dropdown runs an action on the whole collection. Each dropdown remembers the last action you picked (in your user preferences) and preselects it whenever it is available. An action is listed only when it suits every asset it would run on (its asset filter) and the host. Bundled actions import main or highres into Nuke and copy paths. Main and highres imports create Read nodes with explicit frame ranges and color space; an unknown project color space is reported instead of silently using a different one. Which actions you see depends on your groups and the host (see [studio actions and access](actions-and-access.md)).
+The properties action dropdown runs a studio action on the main-view selection or, with nothing selected, on every asset the main view shows (filtered as it is); its first entry then reads **Pick action for all N shown…**, and running it on more than one asset asks first. The collection dropdown runs an action on the whole collection. Each dropdown remembers the last action you picked (in your user preferences) and preselects it whenever it is available. An action is listed only when it suits every asset it would run on (its asset filter) and the host. Bundled actions import main or highres into Nuke, copy paths and [publish to AYON](ayon-publish.md). Main and highres imports create Read nodes with explicit frame ranges and color space; an unknown project color space is reported instead of silently using a different one. Which actions you see depends on your groups and the host (see [studio actions and access](actions-and-access.md)).
 
 ## Asset properties
 
@@ -204,12 +217,12 @@ Deleting is for administrators only; other users don't see the button. While edi
    - **From main folder**: the name of the folder 1, 2 or 3 levels above the main file. For `c:\ingest\fire\mains\assetA.####.exr`, 1 level up is `mains` and 2 levels up is `fire`. The form shows the result.
 3. Choose or drop the main source. The form accepts files and folders dropped from the OS. For Footage, choosing one frame of a sequence detects the contiguous sequence and writes it as `name.####.exr 1001-1100`; for Footage or Still, choosing a folder switches to [folder batch](#folder-ingest). Missing frames and extensions outside the selected type are rejected.
 4. TinyLib fills the asset name (the file name without extension, sequence counter and `v###` token) and lowercase keywords (split at separators and CamelCase). It never overwrites a name or keywords you typed.
-5. Set the main color space, the frame rate for footage, and optionally a highres source where the type supports it.
+5. Set the main color space (just below the main), the frame rate for footage, and optionally a highres source where the type supports it. For Footage, choose whether to [transcode the main](#transcode-main).
 6. For each representation, supply a file or let the farm generate it.
 
 | Representation | Output | Dimensions |
 | --- | --- | --- |
-| Main | Original files copied unchanged | Original |
+| Main | Original files copied unchanged, or with **Transcode main** an image sequence converted from them | Original |
 | Highres | Original files copied unchanged | Original |
 | Proxy, footage | H.264 MP4, Rec.709 | 1920 × 1080 |
 | Proxy, still | JPEG, Rec.709 | 1920 × 1080 when generated; a supplied still proxy may be any size |
@@ -228,7 +241,26 @@ For Footage, what the farm does depends on what you supply:
 | Main and proxy | Takes the generated thumbnail and filmstrip from the proxy with FFmpeg. The proxy is already display-referred and is not passed through OCIO again. vfx-transcode is not used. |
 | Main only, display-referred (a movie such as MOV or MP4, or a PNG, TIFF, DPX or JPG sequence) | Converts the main to scene-linear EXRs in the worker's temp folder (a movie via 16-bit PNGs), using the main color space you chose, then continues as for an EXR main. |
 
-The highres is never converted. The main is never changed either; the scene-linear EXRs are only used to make the previews. Short clips repeat sampled frames to make exactly 24 tiles. The processing profile decides the thumbnail frame: the busiest frame (the largest converted file) or the middle frame.
+The highres is never converted. Without **Transcode main** the main is not changed either; the scene-linear EXRs are only used to make the previews. Short clips repeat sampled frames to make exactly 24 tiles. The processing profile decides the thumbnail frame: the busiest frame (the largest converted file) or the middle frame.
+
+### Transcode main
+
+Stock footage often arrives as a Rec.709 MOV or MP4, which is better kept as an OpenEXR sequence. With **Transcode main** ticked, the farm converts the main to an image sequence, and that sequence becomes the asset's main:
+
+| Field | Default | |
+| --- | --- | --- |
+| Transcode main | on when the main is not an image sequence | In a folder batch it applies to every main that is not an image sequence. |
+| Transcode main extension | `exr` | `exr` (half float), `tif`/`tiff`, `png` (16-bit) or `dpx` (10-bit). |
+| Transcode main compression | `dwaa` | oiiotool compression, e.g. `dwaa`, `dwaa:45`, `zip`, `piz`; `none` or empty for the format's default. |
+| Transcode main start frame | `1001` | The first frame number; the frames are numbered from it. |
+| Transcode main output color space | `ACEScg` | The new frames' color space, and the asset's. Use a name from your OCIO config (`ACES - ACEScg` in an ACES 1.2 config). |
+| Copy main source | on | Also keep the original file (or sequence) unchanged in the asset's `main` folder, beside the new frames. It is recorded as the **main-original** part, shown in **Parts** as e.g. `main:exr main-original:mov proxy:mp4`. |
+
+A movie is decoded by FFmpeg to full-size 16-bit frames; oiiotool converts every frame from the main color space to the output color space with the processing profile's OCIO config, and writes `<asset name>.####.exr` numbered from the start frame. An image sequence (DPX, TIFF, an EXR in another color space) is converted the same way and renumbered. Without **Copy main source** the original is not ingested. The previews are made from the new sequence as for an EXR main.
+
+An alpha channel is detected from the main's pixel format (for example ProRes 4444, PNG or QuickTime Animation movies, or RGBA image sequences) and kept: the frames are decoded and written as RGBA, and the color is converted on the unpremultiplied color, so the alpha itself is unchanged and EXR frames are premultiplied as EXR expects. Without alpha the new frames are RGB.
+
+When the copied original would get the same file names as the new frames (an EXR sequence transcoded to EXR under its own name), the form refuses the job; rename the asset or choose another extension. The defaults can be changed for the studio with `transcode_main` in the browser configuration.
 
 ### Lat-long stills (HDRI)
 

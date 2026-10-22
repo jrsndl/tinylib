@@ -7,7 +7,8 @@ from .qt import QtCore, QtWidgets, exec_dialog
 from .views import heading_font
 from .ingest import (FOLDER_KINDS, PAIRED_ROLES, category_for, paired_roles, clean_asset_name, keywords_from_name, make_manifest,
                      prepare_source, save_manifest, submit_deadline, submit_deadline_batch,
-                     make_folder_manifests)
+                     make_folder_manifests, transcode_defaults, TRANSCODE_TYPES)
+from .library import split_sequence
 from .asset_types import ASSET_TYPES, LATLONG_MAIN_EXTENSIONS, default_metadata, is_two_to_one
 from .metadata_scan import scan_source_metadata
 from .access import root_key
@@ -65,7 +66,8 @@ def folder_manifests(args, progress=None):
     options = args[13] if isinstance(args[13], dict) else {}
     return make_folder_manifests(args[0], args[1], args[3], args[4], args[6], args[7],
                                  progress=progress, pairing=options.get('pairing'), kind=args[12],
-                                 latlong=options.get('is_equirectangular') is True)
+                                 latlong=options.get('is_equirectangular') is True,
+                                 transcode_main=args[14] if len(args) > 14 else None)
 
 
 class Submission(QtCore.QThread):
@@ -335,6 +337,50 @@ class IngestDialog(QtWidgets.QDialog):
         self.source.edit.setAcceptDrops(False)
         self.source.selected.connect(self.source_selected)
         form.addRow('Main', self.source)
+        self.color = IngestComboBox()
+        self.color.setEditable(True)
+        self.color.addItems(settings.get('colorspaces', ['ACES - ACEScg']))
+        form.addRow('Main color space', self.color)
+        # Transcode Main: the farm converts the main (usually a display-referred MOV or MP4) to an
+        # image sequence in the output color space, which becomes the asset's main.
+        defaults = transcode_defaults(settings)
+        self.transcode = QtWidgets.QCheckBox('Convert the main to an image sequence on the farm')
+        self.transcode.setToolTip('The main becomes an image sequence (e.g. OpenEXR) in the output color space,\n'
+                                  'converted from the main color space; previews are made from it. An alpha\n'
+                                  'channel in the main is detected and kept.\n'
+                                  'Ticked automatically when the main is not an image sequence. In a folder\n'
+                                  'batch it applies to the mains that are not image sequences.')
+        form.addRow('Transcode main', self.transcode)
+        self.transcode_extension = IngestComboBox()
+        self.transcode_extension.setEditable(True)
+        self.transcode_extension.addItems(sorted(TRANSCODE_TYPES, key=lambda e: (e != 'exr', e)))
+        self.transcode_extension.setCurrentText(str(defaults['extension']))
+        self.transcode_extension.setToolTip('EXR frames are half float; TIFF and PNG 16-bit; DPX 10-bit.')
+        form.addRow('Transcode main extension', self.transcode_extension)
+        self.transcode_compression = IngestComboBox()
+        self.transcode_compression.setEditable(True)
+        self.transcode_compression.addItems(['dwaa', 'dwab', 'zip', 'zips', 'piz', 'pxr24', 'b44', 'rle', 'none'])
+        self.transcode_compression.setCurrentText(str(defaults['compression']))
+        self.transcode_compression.setToolTip('oiiotool --compression, e.g. dwaa, dwaa:45, zip, piz. Empty: the format default.')
+        form.addRow('Transcode main compression', self.transcode_compression)
+        self.transcode_start = QtWidgets.QSpinBox()
+        self.transcode_start.setRange(0, 9999999)
+        self.transcode_start.setValue(int(defaults['start_frame']))
+        form.addRow('Transcode main start frame', self.transcode_start)
+        self.transcode_output = IngestComboBox()
+        self.transcode_output.setEditable(True)
+        self.transcode_output.addItems(settings.get('colorspaces', ['ACES - ACEScg']))
+        self.transcode_output.setCurrentText(str(defaults['output_colorspace']))
+        self.transcode_output.setToolTip('Color space of the new main frames; the asset gets this color space.')
+        form.addRow('Transcode main output color space', self.transcode_output)
+        self.transcode_copy = QtWidgets.QCheckBox('Keep the original file(s) beside the transcoded main')
+        self.transcode_copy.setChecked(bool(defaults.get('copy_source', True)))
+        self.transcode_copy.setToolTip('The original main is copied into the asset\'s main folder as it is and\n'
+                                       'recorded as the main-original part.')
+        form.addRow('Copy main source', self.transcode_copy)
+        self.transcode_fields = (self.transcode_extension, self.transcode_compression, self.transcode_start,
+                                 self.transcode_output, self.transcode_copy)
+        self.transcode.toggled.connect(self.update_transcode)
         self.batch_hint = QtWidgets.QLabel(
             'Folder batch: each detected sequence or container (Footage), or each image file (Still), becomes '
             'a separate Deadline job. Names, keywords and, for footage, FPS are automatic. Paired components '
@@ -390,10 +436,6 @@ class IngestDialog(QtWidgets.QDialog):
         self.highres = PathField()
         self.highres.setToolTip('Copied as it is; never converted.')
         form.addRow('Highres (optional)', self.highres)
-        self.color = IngestComboBox()
-        self.color.setEditable(True)
-        self.color.addItems(settings.get('colorspaces', ['ACES - ACEScg']))
-        form.addRow('Main color space', self.color)
         self.tags = QtWidgets.QLineEdit()
         self.tags.setPlaceholderText('Comma-separated keywords; new keywords are welcome')
         form.addRow('Keywords', self.tags)
@@ -446,7 +488,7 @@ class IngestDialog(QtWidgets.QDialog):
         self.update_type(self.kind.currentData())
         self.set_batch_mode(False)  # pairing rows show only for a folder batch
         note = QtWidgets.QLabel('Generated previews are available for Still and Footage. Other asset types require a supplied JPG thumbnail. '
-                              'Main and highres files are copied without changing their pixels. For Footage with a supplied '
+                              'Main and highres files are copied without changing their pixels, unless Transcode main is ticked. For Footage with a supplied '
                               'proxy, a generated thumbnail and filmstrip are taken from the proxy.')
         note.setWordWrap(True)
         form.addRow('', note)
@@ -490,10 +532,29 @@ class IngestDialog(QtWidgets.QDialog):
                 path.setEnabled(preferred == 'supply')
         self.fps.setEnabled(kind == 'footage')
         self.color.setEnabled(visual)
+        for widget in (self.transcode,) + self.transcode_fields:
+            widget.setVisible(kind == 'footage')
+            self.form.labelForField(widget).setVisible(kind == 'footage')
+        self.update_transcode()
         self.metadata.setPlainText(json.dumps(default_metadata(kind), indent=2))
         self.show_latlong_row()
         if self.source.text():
             self.source_selected(self.source.text())
+
+    def update_transcode(self, *_):
+        for widget in self.transcode_fields:
+            widget.setEnabled(self.transcode.isChecked())
+
+    def transcode_main(self):
+        """The Transcode Main options for the manifest, or None."""
+        if self.kind.currentData() != 'footage' or not self.transcode.isChecked():
+            return None
+        compression = self.transcode_compression.currentText().strip()
+        return {'extension': self.transcode_extension.currentText().strip(),
+                'compression': '' if compression == 'none' else compression,
+                'start_frame': self.transcode_start.value(),
+                'output_colorspace': self.transcode_output.currentText().strip(),
+                'copy_source': self.transcode_copy.isChecked()}
 
     def show_latlong_row(self):
         visible = self.kind.currentData() == 'still'  # also for a folder batch: every still is flagged
@@ -654,6 +715,8 @@ class IngestDialog(QtWidgets.QDialog):
                 self.source.edit.setText(value)
                 self._batch_folder = value
                 self.set_batch_mode(True)
+                if self.kind.currentData() == 'footage':
+                    self.transcode.setChecked(True)  # applies to the mains that are not image sequences
                 self.invalidate_proxy()
                 self.status.setText('Folder batch selected. Choose where the proxies, highres and other '
                                     'components are%s; Review job shows how they paired.'
@@ -671,6 +734,9 @@ class IngestDialog(QtWidgets.QDialog):
             if not self.tags.text().strip() or self.tags.text() == self._auto_tags:
                 self.tags.setText(keywords)
                 self._auto_tags = keywords
+            if self.kind.currentData() == 'footage':
+                # A MOV or MP4 main is usually better as an image sequence: transcode it by default.
+                self.transcode.setChecked(split_sequence(source)[1] is None)
             self.status.setText('Main source is valid for %s.' % ASSET_TYPES[self.kind.currentData()]['label'])
             self.update_category_preview()
             if self.kind.currentData() == 'footage':
@@ -818,7 +884,7 @@ class IngestDialog(QtWidgets.QDialog):
             category, self.source.text(), self.tags.text().split(','),
             self.color.currentText(), self.profile.currentText(),
             {k: {'mode': mode.currentText(), 'path': path.text()} for k, (mode, path) in self.media.items()},
-            self.fps.value(), self.highres.text(), 'main', self.kind.currentData(), metadata)
+            self.fps.value(), self.highres.text(), 'main', self.kind.currentData(), metadata, self.transcode_main())
 
     def manifest(self):
         return build_manifest(self.manifest_arguments(), bool(self._batch_folder))

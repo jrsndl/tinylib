@@ -21,6 +21,8 @@ ffprobe = ffprobe
 ffplay = ffplay
 oiiotool = oiiotool
 vfx_transcode = vfx-transcode
+# AYON launcher console, for the Publish to AYON action outside an AYON-launched Nuke.
+# ayon_console = C:/Program Files/Ynput/AYON 1.6.3/ayon_console.exe
 # OCIO config for generated previews; overrides each profile's "ocio_config".
 # A path, or a built-in config such as ocio://studio-config-latest.
 # ocio = //studio/pipeline/ocio/aces_1.2/config.ocio

@@ -173,7 +173,7 @@ class Library:
         from .asset_fields import apply_defaults
         result = copy.deepcopy(record)
         apply_defaults(result)
-        for key in ('main', 'thumb', 'proxy', 'filmstrip', 'highres', 'scene'):
+        for key in ('main', 'main-original', 'thumb', 'proxy', 'filmstrip', 'highres', 'scene'):
             result[key] = self.resolve(result.get(key, ''))
         asset_dir = Path(result['main']).parent if result.get('kind') == 'folder' else Path(result['main']).parent.parent
         missing = [key for key in ('thumb', 'proxy', 'filmstrip', 'highres', 'scene') if not result[key]]
@@ -250,7 +250,7 @@ class Library:
                 result.pop(key)
         for key in ('library', 'library_root'):
             result.pop(key, None)
-        for key in ('main', 'thumb', 'proxy', 'filmstrip', 'highres', 'scene'):
+        for key in ('main', 'main-original', 'thumb', 'proxy', 'filmstrip', 'highres', 'scene'):
             if result.get(key):
                 try:
                     result[key] = Path(result[key]).relative_to(self.root).as_posix()
@@ -417,7 +417,7 @@ class Library:
                         problems.append('%s: files kept, %s.' % (original['name'], reason))
                         continue
                     folders.append((original, folder))
-                    for role in ('highres', 'proxy', 'thumb', 'filmstrip', 'scene'):
+                    for role in ('main-original', 'highres', 'proxy', 'thumb', 'filmstrip', 'scene'):
                         path = original.get(role)
                         if path and resolved not in _resolved(path).parents:
                             problems.append('%s: %s kept, it is outside the asset folder: %s'

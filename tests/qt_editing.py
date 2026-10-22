@@ -248,7 +248,7 @@ for mode in ('Tiles', 'Details', 'List'):
 # Copy uses only a proper subset selection; no selection or all selected means all.
 window.preferences.add_assets(first, assets)
 window.collections.refresh(first)
-window.path_notation.setCurrentIndex(window.path_notation.findData('flame'))
+window.set_path_notation('flame')
 select(window.collections.model, window.collections.grid, 0)
 window.collections.copy_paths()
 assert app.clipboard().text() == format_assets([window.collections.model.assets[0]], 'flame')
@@ -267,7 +267,7 @@ window.view_mode.setCurrentText('Tiles')
 select(window.model, window.grid, 0)
 # External drag text and Ctrl+C share the selected preference and use forward slashes.
 for notation in ('nuke', 'ayon', 'hashtag', 'houdini', 'flame', 'printf', 'folder'):
-    window.path_notation.setCurrentIndex(window.path_notation.findData(notation))
+    window.set_path_notation(notation)
     mime = window.model.mimeData(window.grid.selectionModel().selectedIndexes())
     assert mime.text() == format_assets(window.main_selected(), notation)
     assert '\\' not in mime.text()

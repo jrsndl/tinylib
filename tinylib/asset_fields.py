@@ -30,12 +30,12 @@ PART_ROLES_HIDDEN = ('thumb', 'filmstrip')
 def asset_parts(asset):
     """The asset's components and their file types, e.g. ``main:exr highres:exr proxy:jpg``.
 
-    ``main`` comes first, the others alphabetically; thumbnail and filmstrip are left out.
+    ``main`` comes first, then ``main-original`` (a transcoded main's original), the others alphabetically; thumbnail and filmstrip are left out.
     A component without a file extension (a Folder asset's folders) shows ``folder``.
     """
-    roles = ('main', 'highres', 'proxy', 'scene', 'thumb', 'filmstrip')
+    roles = ('main', 'main-original', 'highres', 'proxy', 'scene', 'thumb', 'filmstrip')
     present = [role for role in roles if role not in PART_ROLES_HIDDEN and asset.get(role)]
-    present.sort(key=lambda role: (role != 'main', role))
+    present.sort(key=lambda role: (role != 'main', role != 'main-original', role))
     parts = []
     for role in present:
         # A sequence may carry its frame range: "plate.####.exr 1001-1100".

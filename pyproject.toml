@@ -12,6 +12,9 @@ dependencies = []  # Inside Nuke, Nuke supplies Qt. Standalone, install one of t
 pyside6 = ["PySide6>=6.5", "numpy>=1.21"]
 # Nuke 15 (Python 3.10 at most; PySide2 has no wheels for newer Python).
 pyside2 = ["PySide2>=5.15", "numpy>=1.21"]
+# The Publish to AYON action outside an AYON-launched Nuke: AYON server access and the
+# Windows Credential Manager for sign-ins.
+ayon = ["ayon-python-api>=1.0", "keyring>=24"]
 dev = ["ruff>=0.6"]
 
 [dependency-groups]

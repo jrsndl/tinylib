@@ -38,6 +38,8 @@ ASSET_TYPES = {
             'main': (True, ['extensions_stills', 'extensions_stills_raw', 'extensions_footage_containers']),
             'highres': (False, ['extensions_stills', 'extensions_stills_raw', 'extensions_footage_containers']),
             'proxy': (False, ['mp4']), 'thumb': (True, ['jpg']), 'filmstrip': (False, ['jpg']),
+            # The original of a transcoded main ("Copy main source"), beside the new main.
+            'main-original': (False, ['extensions_stills', 'extensions_stills_raw', 'extensions_footage_containers']),
         },
         'metadata': dict(VISUAL_METADATA, duration_frames='integer', duration_seconds='number',
                          frame_start='integer', frame_end='integer'),
