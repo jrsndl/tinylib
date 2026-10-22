@@ -52,6 +52,7 @@ REQUIREMENTS = {
     'qt_smoke': [_file('config/demo.json', 'config/demo.local.json'), _file('testdata')],
     'qt_performance': [_file('config/performance.json', 'config/performance.local.json')],
     'qt_player': [_tools('ffmpeg', 'ffprobe')],
+    'qt_pano': [_file('testdata/hdrilib'), _tools('ffmpeg', 'ffprobe')],
     'player_smoke': [_tools('ffmpeg', 'ffprobe', 'ffplay')],
     'processing_smoke': [_file('testdata/demolib'), _file('testdata/hdrilib'), _tools('ffmpeg', 'ffprobe', 'oiiotool')],
     'vfx_smoke': [_file('testdata/demolib'), _tools('ffmpeg', 'ffprobe', 'oiiotool', 'vfx_transcode')],

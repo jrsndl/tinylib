@@ -6,7 +6,7 @@ from pathlib import Path
 SCHEMA_VERSION = 1
 
 DEFAULT_EXTENSION_GROUPS = {
-    'extensions_stills': ['exr', 'bmp', 'jpg', 'jpeg', 'tif', 'tiff', 'png', 'tga', 'dpx', 'cin', 'psd', 'tx', 'sgi', 'heic', 'fla', 'cr2', 'cr3', 'dng', 'webp'],
+    'extensions_stills': ['exr', 'hdr', 'bmp', 'jpg', 'jpeg', 'tif', 'tiff', 'png', 'tga', 'dpx', 'cin', 'psd', 'tx', 'sgi', 'heic', 'fla', 'cr2', 'cr3', 'dng', 'webp'],
     'extensions_stills_raw': ['cr2', 'cr3', 'dng', 'nef', 'nrw', 'arw', 'srf', 'sr2'],
     'extensions_footage_containers': ['mov', 'mp4', 'webm', 'avi', 'qt', 'wmv', 'mpg', 'mxf', 'mkv'],
     'extensions_models': ['abc', 'fbx', 'obj', 'usd', 'usda', 'usdc', 'usdz', 'gltf', 'glb', 'ply', 'stl'],
@@ -76,6 +76,23 @@ ASSET_TYPES = {
         'metadata': {'renderer': 'text', 'file_size_main': 'integer', 'file_size_total': 'integer'},
     },
 }
+
+# A lat-long (equirectangular, HDRI) still: metadata ``is_equirectangular`` is true. Its main is
+# scene-linear EXR or Radiance HDR; its proxy and thumbnail are tonemapped 2:1 lat-long JPEGs.
+LATLONG_MAIN_EXTENSIONS = ('exr', 'hdr')
+
+
+def is_latlong(asset):
+    """Whether an asset record or manifest is a lat-long still."""
+    return (canonical_type(asset.get('kind', '')) == 'still'
+            and (asset.get('metadata') or {}).get('is_equirectangular') is True)
+
+
+def is_two_to_one(width, height):
+    """A lat-long frame: width twice height, within a pixel of rounding."""
+    width, height = int(width), int(height)
+    return height > 0 and abs(width - 2 * height) <= 1
+
 
 def extension_groups(settings=None):
     groups = copy.deepcopy(DEFAULT_EXTENSION_GROUPS)

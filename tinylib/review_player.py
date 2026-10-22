@@ -260,6 +260,7 @@ class ReviewPlayer(QtWidgets.QWidget):
     frame_shown = QtCore.Signal(int)
     rating_requested = QtCore.Signal(int)
     trim_requested = QtCore.Signal(object)  # (in, out) in asset frame numbers, or None for the whole range.
+    navigate_requested = QtCore.Signal(int)  # PgUp -1 / PgDn +1: the previous or next asset
 
     def __init__(self, settings, asset, stream, parent=None):
         super().__init__(parent, QtCore.Qt.Window)
@@ -269,10 +270,19 @@ class ReviewPlayer(QtWidgets.QWidget):
         self.resize(1100, 660)
         self.setMouseTracking(True)
         self.setFocusPolicy(QtCore.Qt.StrongFocus)
-        self.setToolTip('J/L: reverse/forward, repeat for speed · K: stop · Space: play/stop\n'
-                        'Left/Right: one frame · I/O: set in/out point · Alt+X: clear in/out\n'
-                        'F: frame overlay · Ctrl+C: copy stopped frame at full resolution\n'
-                        'Hover bottom: timeline and Loop')
+        self.setToolTip('\n'.join([  # one control per line
+            'J / L: reverse / forward; press again for more speed',
+            'K: stop',
+            'Space: play / stop',
+            'Left / Right: one frame back / forward',
+            'I / O: set the in / out point',
+            'Alt+X: clear in and out',
+            'F: frame-number overlay',
+            'Ctrl+C: copy the stopped frame at full resolution',
+            '0–5: rating',
+            'PgUp / PgDn: previous / next asset',
+            'Hover at the bottom: timeline and Loop',
+            'Esc / Q: close']))
         self.fps, self.count = media_info(asset, stream)
         self.first = int(asset['first']) if asset.get('first') is not None else 1
         self.footage = asset.get('kind') == 'footage'
@@ -363,6 +373,29 @@ class ReviewPlayer(QtWidgets.QWidget):
             self.timeline.blockSignals(True)
             self.timeline.setValue(self.current)
             self.timeline.blockSignals(False)
+        self.update()
+
+    def carry_state(self):
+        """What the next asset (PgUp/PgDn) keeps from this one."""
+        return {'direction': self.direction, 'speed': self.speed, 'loop': self.loop, 'overlay': self.overlay}
+
+    def apply_state(self, state):
+        """Start like the previous asset's player: playing in the same direction and speed, or stopped."""
+        self.overlay = bool(state.get('overlay', self.overlay))
+        if 'loop' in state:
+            self.loop_toggle.setChecked(bool(state['loop']))
+        if 'direction' not in state:
+            return
+        direction = int(state['direction'] or 0)
+        if not direction or self.count <= 1:
+            self.stop_playback()
+        else:
+            if direction < 0:  # reverse playback starts at the out point
+                self.current = self.target = self.out_point
+            self.direction, self.speed = direction, max(1, min(16, int(state.get('speed') or 1)))
+            self.fraction = 0.0
+            self.clock.restart()
+            self.update_indicator()
         self.update()
 
     def stop_playback(self):
@@ -526,6 +559,11 @@ class ReviewPlayer(QtWidgets.QWidget):
             event.accept()
             return
         alt = bool(event.modifiers() & QtCore.Qt.AltModifier)
+        if key in (QtCore.Qt.Key_PageUp, QtCore.Qt.Key_PageDown):
+            if not event.isAutoRepeat():
+                self.navigate_requested.emit(-1 if key == QtCore.Qt.Key_PageUp else 1)
+            event.accept()
+            return
         if key == QtCore.Qt.Key_X and alt:
             if self.footage and self.trimmed():
                 self.set_trim(0, self.count - 1, 'In/out cleared')

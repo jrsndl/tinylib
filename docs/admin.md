@@ -38,6 +38,33 @@ Scans the selected Still and Footage assets, or the whole selected library when 
 
 Sorts the selected writable library's schema version 3 database by category and asset name (case-insensitive), then reloads the browser. Select any category to sort its whole library; from "All libraries", choose the library first. Sorting keeps record contents and uses the same edit lock, administrator override and atomic write as editing. Run it again after new ingests.
 
+### Labels from names…
+
+Makes asset labels (the names shown in the browser, see [asset types](asset-types.md#common-asset-fields)) from asset names, in one writable library at a time. Pick the library in the dialog; it starts on the library of the selected category. The asset names and folders never change.
+
+| Option | Default | Effect |
+| --- | --- | --- |
+| **Only assets with an empty label** | on | Off: labels set by hand are replaced too. |
+| **Split words at capitals** | on | `abandonedBakery` → `abandoned bakery`. The capital becomes lowercase; acronyms stay: `HDRISky` → `HDRI sky`. A capital after a space, underscore or dash is kept. |
+| **Replace underscores and dashes with spaces** | on | `plhn_indoor-01` → `plhn indoor 01`. |
+| **Replace 1–3** | empty | Search and replace pairs: plain text, case-sensitive, applied in order after the options above. An empty replacement removes the text, e.g. `plhn ` → nothing. |
+
+Repeated spaces become one and the ends are trimmed. A label that comes out equal to the name is left empty, which shows the name anyway. The preview lists every asset that gets a new label, with its current and new label, and updates as you change the options. **Apply labels** re-reads the library database and writes them with the same edit lock, administrator override and atomic write as editing, then the browser reloads.
+
+### Keyword cleaner…
+
+Cleans asset keywords in one writable library at a time. Pick the library in the dialog; it starts on the library of the selection, or of the selected category.
+
+**Works on** says what is changed: when assets of that library are selected in the main view, **only those selected assets**; otherwise the whole library. Clear the selection to clean the whole library.
+
+| Option | Default | Effect |
+| --- | --- | --- |
+| **Remove keywords that are only a number** | on | `01`, `2525` and `1.5` go; `2k` and `v002` stay. |
+| **Replace 1–3** | empty | The search matches a **whole** keyword, ignoring case. The keyword is replaced by the replacement; an empty replacement removes it, and a comma-separated one gives several keywords (`abandonedbakery` → `abandoned, bakery`). Applied in order, after removing numbers. |
+| **Add keywords** | empty | Comma-separated keywords added to every asset in scope (lowercase, at the end), unless the asset already has them. Applied last. |
+
+The same keyword (ignoring case) is kept once; the order of the other keywords is kept. The preview lists every asset whose keywords change, with its keywords now and after. **Apply keywords** re-reads the library database and writes them with the same edit lock, administrator override and atomic write as editing, then the browser reloads.
+
 ### Create new library…
 
 Asks for a name, root folder and settings source: Studio defaults or an existing library. You can change the copied read-only setting.

@@ -17,6 +17,10 @@ class FilterTests(unittest.TestCase):
         value = asset()
         self.assertAlmostEqual(duration(value), 10.01)
         self.assertTrue(accepts(value, 'fire', False, ['smoke'], ('>', 10), ('>', 1920), ('>', 3), 4))
+        # The star filter: at least n stars.
+        self.assertTrue(accepts(value, stars=('>=', 4), rating=4))
+        self.assertFalse(accepts(value, stars=('>=', 5), rating=4))
+        self.assertTrue(accepts(value, stars=('', 0), rating=0))
         self.assertFalse(accepts(value, 'fire', True))
         self.assertTrue(accepts(value, 'rain', True, ['smoke']))
         self.assertFalse(accepts(value, 'rain', True, ['missing']))

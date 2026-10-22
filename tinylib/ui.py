@@ -7,7 +7,7 @@ import threading
 import time
 from .qt import QtCore, QtGui, QtWidgets, HOSTED_IN_NUKE, exec_dialog
 from .settings import load_settings
-from .preferences import Preferences, asset_key, COLLECTION_MIME
+from .preferences import Preferences, adjacent_asset, asset_key, COLLECTION_MIME
 from .filters import accepts
 from .collection_ui import CollectionsPanel
 from .views import (stylesheet, Loader, ImageCache, AssetModel, Grid, DetailsView,
@@ -30,7 +30,7 @@ from .library import Library
 from .thumbnail_cache import prune_cache
 from .log import configure as configure_logging, log_path
 from .library_tools import require_admin
-from .library_tools_ui import CrosscheckDialog, MetadataRescanDialog, LibrarySortDialog, CreateLibraryDialog
+from .library_tools_ui import CrosscheckDialog, MetadataRescanDialog, LibrarySortDialog, CreateLibraryDialog, LabelsDialog, KeywordsDialog
 
 
 class StarButton(QtWidgets.QPushButton):
@@ -61,6 +61,50 @@ class StarButton(QtWidgets.QPushButton):
         painter.end()
 
 
+class NumberEdit(QtWidgets.QLineEdit):
+    """A plain text field for a non-negative number, with the ``value``/``setValue``/
+    ``valueChanged`` interface of a spin box.
+
+    A spin box rejected some keystrokes (a digit beyond its decimals, typing over ``0.000``)
+    and, with the stylesheets' padding, could squeeze its inner text field until it took no
+    input at all. Empty means 0. A comma is read as a decimal point.
+    """
+    valueChanged = QtCore.Signal(float)
+
+    def __init__(self, maximum, decimals=0, parent=None):
+        super().__init__(parent)
+        self.maximum, self.decimals = maximum, decimals
+        pattern = r'^\d*$' if not decimals else r'^\d*([.,]\d{0,%d})?$' % decimals
+        expression = getattr(QtCore, 'QRegularExpression', None)
+        if expression is not None and hasattr(QtGui, 'QRegularExpressionValidator'):
+            self.setValidator(QtGui.QRegularExpressionValidator(expression(pattern), self))
+        else:  # Qt 5 without QRegularExpressionValidator
+            self.setValidator(QtGui.QRegExpValidator(QtCore.QRegExp(pattern), self))
+        self.setPlaceholderText('0')
+        self._last = (False, 0.0)  # (has a number, value): typing "0" counts, e.g. Stars = 0
+        self.textChanged.connect(self._text_changed)
+
+    def value(self):
+        text = self.text().strip().replace(',', '.')
+        try:
+            number = float(text) if text not in ('', '.') else 0.0
+        except ValueError:
+            number = 0.0
+        return min(float(self.maximum), max(0.0, number))
+
+    def setValue(self, value):
+        value = min(float(self.maximum), max(0.0, float(value)))
+        text = ('%d' % round(value)) if not self.decimals else ('%.*f' % (self.decimals, value)).rstrip('0').rstrip('.')
+        self.setText('' if value == 0 else text)
+        self._text_changed()
+
+    def _text_changed(self, *_):
+        state = (bool(self.text().strip()), self.value())
+        if state != self._last:
+            self._last = state
+            self.valueChanged.emit(state[1])
+
+
 class NumericFilter(QtWidgets.QWidget):
     """Label, operator (Any, >, <, =) and a number. The number is always editable:
     typing one while the operator is Any switches to ``typed_operator``."""
@@ -77,11 +121,8 @@ class NumericFilter(QtWidgets.QWidget):
         self.operator = QtWidgets.QComboBox()
         for text, value in [('Any', ''), ('>', '>'), ('<', '<'), ('=', '=')]:
             self.operator.addItem(text, value)
-        self.value = QtWidgets.QDoubleSpinBox()
-        self.value.setDecimals(decimals)
-        self.value.setRange(0, maximum)
+        self.value = NumberEdit(maximum, decimals)
         self.value.setFixedWidth(width)
-        self.value.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
         self.value.setObjectName('filterValue')
         self.value.setToolTip(tooltip + ('. ' if tooltip else '') +
                               'Type a number; with Any, the operator becomes %s.' % typed_operator)
@@ -100,9 +141,13 @@ class NumericFilter(QtWidgets.QWidget):
     def value_changed(self, *_):
         if self._resetting:
             return
+        empty = not self.value.text().strip()
         if not self.operator.currentData():
-            # Typing a number means filtering by it; this also emits changed.
-            self.operator.setCurrentIndex(self.operator.findData(self.typed_operator))
+            if not empty:
+                # Typing a number means filtering by it; this also emits changed.
+                self.operator.setCurrentIndex(self.operator.findData(self.typed_operator))
+        elif empty:
+            self.operator.setCurrentIndex(0)  # clearing the number turns the rule off again
         else:
             self.changed.emit()
 
@@ -117,6 +162,58 @@ class NumericFilter(QtWidgets.QWidget):
 
     def rule(self):
         return self.operator.currentData(), self.value.value()
+
+
+class StarFilter(QtWidgets.QWidget):
+    """The rating filter: the same five stars as **Rate selection**, choosing a minimum.
+
+    Click a star to show assets with at least that many stars; click the highest lit star
+    again, or **Any**, to stop filtering by rating. ``rule()`` is ``('>=', n)`` or ``('', 0)``.
+    """
+    changed = QtCore.Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.minimum = 0
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        label = QtWidgets.QLabel('Stars')
+        label.setToolTip('Show assets with at least this many stars')
+        layout.addWidget(label)
+        layout.addSpacing(4)
+        self.buttons = []
+        for value in range(1, 6):
+            button = StarButton(value)
+            button.setAccessibleName('At least %d stars' % value)
+            button.setToolTip('Show assets with at least %d star%s; click again for any rating'
+                              % (value, '' if value == 1 else 's'))
+            button.clicked.connect(lambda checked=False, stars=value: self.toggle(stars))
+            layout.addWidget(button)
+            self.buttons.append(button)
+        layout.addSpacing(4)
+        self.any_button = QtWidgets.QPushButton('Any')
+        self.any_button.setToolTip('Any rating, rated or not')
+        self.any_button.clicked.connect(lambda: self.set_minimum(0))
+        layout.addWidget(self.any_button)
+        self.set_minimum(0, notify=False)
+
+    def toggle(self, stars):
+        self.set_minimum(0 if stars == self.minimum else stars)
+
+    def set_minimum(self, stars, notify=True):
+        self.minimum = max(0, min(5, int(stars)))
+        for value, button in enumerate(self.buttons, 1):
+            button.set_filled(value <= self.minimum)
+        self.any_button.setEnabled(bool(self.minimum))
+        if notify:
+            self.changed.emit()
+
+    def reset(self):
+        self.set_minimum(0, notify=False)
+
+    def rule(self):
+        return ('>=', self.minimum) if self.minimum else ('', 0)
 
 
 PANEL_GAP = 6
@@ -142,6 +239,7 @@ class Browser(QtWidgets.QWidget):
         self.player.error.connect(self.show_error)
         self.player.rating_requested.connect(self.rate_asset)
         self.player.trim_requested.connect(self.trim_asset)
+        self.player.navigate_requested.connect(self.play_adjacent)
         self.preferences = Preferences(preferences_path)
         self.assets, self.errors = [], []
         self.edit_mode = False
@@ -237,6 +335,10 @@ class Browser(QtWidgets.QWidget):
         rescan_action.triggered.connect(self.rescan_metadata)
         sort_action = tools_menu.addAction('Library sort…')
         sort_action.triggered.connect(self.library_sort)
+        labels_action = tools_menu.addAction('Labels from names…')
+        labels_action.triggered.connect(self.labels_from_names)
+        keywords_action = tools_menu.addAction('Keyword cleaner…')
+        keywords_action.triggered.connect(self.keyword_cleaner)
         create_action = tools_menu.addAction('Create new library…')
         create_action.triggered.connect(self.create_new_library)
         self.library_tools_button.setMenu(tools_menu)
@@ -350,7 +452,7 @@ class Browser(QtWidgets.QWidget):
         row = QtWidgets.QHBoxLayout()
         self.length_filter = NumericFilter('Length', 1000000, 3, tooltip='Length in seconds (frames ÷ frame rate)', width=80)
         self.width_filter = NumericFilter('Width', 1000000, tooltip='Width in pixels', width=64)
-        self.stars_filter = NumericFilter('Stars', 5, tooltip='Star rating, 0 to 5', width=36, typed_operator='=')
+        self.stars_filter = StarFilter()
         for widget in (self.length_filter, self.width_filter, self.stars_filter):
             row.addWidget(widget)
         row.addSpacing(16)
@@ -1256,15 +1358,38 @@ class Browser(QtWidgets.QWidget):
         assets = self.selected_assets()
         if len(assets) == 1:
             try:
-                self.access.refresh()
-                self.access.require(assets[0]['library_root'], 'view')
-                # Played from a collection, the player uses and edits that collection's in/out points;
-                # otherwise the user's own.
-                collection = self.collections.combo.currentData() if self.selection_source == 'collection' else None
-                trim = self.preferences.trim(assets[0], collection)
-                self.player.play(dict(assets[0], _trim=trim, _trim_collection=collection))
+                self.play_asset(assets[0], self.selection_source)
             except Exception as error:
                 self.show_error(str(error))
+
+    def play_asset(self, asset, source, replace=None):
+        """Open the player for ``asset``. ``source`` is where it was played from, ``'main'``
+        or ``'collection'``: PgUp/PgDn then step through that list."""
+        self.access.refresh()
+        self.access.require(asset['library_root'], 'view')
+        # Played from a collection, the player uses and edits that collection's in/out points;
+        # otherwise the user's own.
+        collection = self.collections.combo.currentData() if source == 'collection' else None
+        trim = self.preferences.trim(asset, collection)
+        self.player.play(dict(asset, _trim=trim, _trim_collection=collection, _play_source=source), replace)
+
+    def play_list(self, source):
+        """The assets PgUp/PgDn step through: the current collection, or what the main view shows
+        (filtered and sorted as it is now)."""
+        if source == 'collection':
+            return [asset for asset in self.collections.model.assets if not asset.get('_unavailable')]
+        return list(self.model.assets)
+
+    def play_adjacent(self, asset, step, window):
+        """PgUp/PgDn in a player: the previous or next asset of its list, wrapping at the ends."""
+        source = asset.get('_play_source', 'main')
+        target = adjacent_asset(self.play_list(source), asset, step)
+        if target is None:
+            return
+        try:
+            self.play_asset(target, source, replace=window)
+        except Exception as error:
+            self.show_error(str(error))
 
     def update_actions(self):
         assets = self.main_selected()
@@ -1394,6 +1519,46 @@ class Browser(QtWidgets.QWidget):
         dialog.deleteLater()
         if sorted_result is not None:
             self.reload(use_index_cache=False)
+
+    def labels_from_names(self):
+        if not self.require_admin():
+            return
+        if self.edit_session:
+            return self.show_error('Finish editing before making labels.')
+        libraries = [library for library in self.settings['libraries']
+                     if not (library.get('read_only') or self.access.read_only(library['root']))
+                     and self.access.can(library['root'], 'view') and self.access.can(library['root'], 'edit')]
+        if not libraries:
+            return self.show_error('No writable library is available for labels.')
+        current = self.categories.currentItem()
+        root = current.data(0, QtCore.Qt.UserRole)[0] if current else ''
+        dialog = LabelsDialog(libraries, self.assets, self.settings, self.access, root, self)
+        exec_dialog(dialog)
+        written = dialog.result
+        dialog.deleteLater()
+        if written and written['changes']:
+            self.reload(use_index_cache=False)
+            self.status.setText('Labels from names: %d labels written.' % len(written['changes']))
+
+    def keyword_cleaner(self):
+        if not self.require_admin():
+            return
+        if self.edit_session:
+            return self.show_error('Finish editing before cleaning keywords.')
+        libraries = [library for library in self.settings['libraries']
+                     if not (library.get('read_only') or self.access.read_only(library['root']))
+                     and self.access.can(library['root'], 'view') and self.access.can(library['root'], 'edit')]
+        if not libraries:
+            return self.show_error('No writable library is available for the keyword cleaner.')
+        current = self.categories.currentItem()
+        root = current.data(0, QtCore.Qt.UserRole)[0] if current else ''
+        dialog = KeywordsDialog(libraries, self.assets, self.main_selected(), self.settings, self.access, root, self)
+        exec_dialog(dialog)
+        written = dialog.result
+        dialog.deleteLater()
+        if written and written['changes']:
+            self.reload(use_index_cache=False)
+            self.status.setText('Keyword cleaner: keywords of %d assets changed.' % len(written['changes']))
 
     def rescan_metadata(self):
         if not self.require_admin():

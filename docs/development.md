@@ -48,6 +48,7 @@ Each script runs in its own process with `QT_QPA_PLATFORM=offscreen` and its res
 | `qt_performance.py` | `config/performance.local.json` naming a read-only library |
 | `processing_smoke.py`, `vfx_smoke.py` | `testdata/` sample media, oiiotool, FFmpeg and an OCIO config; `vfx_smoke.py` also vfx-transcode |
 | `player_smoke.py`, `qt_player.py` | FFmpeg (and ffplay for `player_smoke.py`) |
+| `qt_pano.py` | `testdata/hdrilib`, FFmpeg and OpenGL. On Windows its window appears briefly, because Qt's offscreen platform has no OpenGL there; `python tests/qt_pano.py --show` keeps it open to try by hand. |
 
 Without these, the runner reports the script as `skip` with what is missing, instead of running it. Do not run the scripts with `python -O`; they check results with `assert`.
 

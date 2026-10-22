@@ -4,13 +4,15 @@ TinyLib's versioned asset schema is defined in `tinylib/asset_types.py`. Extensi
 
 | Type | Main | Optional representations | Metadata |
 | --- | --- | --- | --- |
-| Still | still or camera-raw image | highres image, JPEG proxy | width, height, pixel aspect, equirectangular/raw flags, timecode, frame rate, reel ID, sizes. The color space is the asset's own **Color space** field, not metadata. |
+| Still | still or camera-raw image (EXR or HDR when lat-long) | highres image, JPEG proxy | width, height, pixel aspect, equirectangular/raw flags, timecode, frame rate, reel ID, sizes. The color space is the asset's own **Color space** field, not metadata. |
 | Footage | image sequence, camera-raw sequence or footage container | highres, MP4 proxy, JPEG filmstrip | Still fields plus frame duration, seconds and frame range |
 | Model | model file | highres model, proxy model, scene | faces, UV/textured/rigged/animated flags, relative texture paths, source DCC, renderer, sizes |
 | Folder | folder containing any files | highres folder, proxy folder | relative file list and sizes |
 | Splat | splat file | none | source image count and sizes |
 | PDF | PDF file | none | sizes |
 | Material | material file | none | target renderer and sizes |
+
+A Still with `is_equirectangular` true is a lat-long (HDRI) still. Its main must be EXR or HDR (`hdr` is in `extensions_stills`). Its proxy and thumbnail are tonemapped 2:1 lat-long JPEGs of any size; other Stills keep the 960 × 506 thumbnail, and a Still's proxy is never size-checked. Lat-long stills open in the 360 viewer.
 
 Model texture paths and Folder file paths are stored relative to the asset folder. Absolute paths and parent traversal are rejected. File sizes are bytes. Integer and numeric metadata cannot be negative.
 

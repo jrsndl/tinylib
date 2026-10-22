@@ -19,6 +19,21 @@ def asset_key(asset):
     return json.dumps([os.path.normcase(root), os.path.normcase(main)], ensure_ascii=False)
 
 
+def adjacent_asset(assets, asset, step):
+    """The asset ``step`` places from ``asset`` in ``assets``, wrapping at both ends.
+
+    An asset no longer in the list (filtered out, removed) steps to the first (``step`` > 0)
+    or the last asset. None for an empty list.
+    """
+    if not assets:
+        return None
+    keys = [asset_key(item) for item in assets]
+    key = asset_key(asset)
+    if key in keys:
+        return assets[(keys.index(key) + step) % len(assets)]
+    return assets[0] if step > 0 else assets[-1]
+
+
 def reference(asset):
     return {key: asset.get(key, '') for key in
             ('name', 'library', 'library_root', 'main', 'id', 'kind', 'category', 'thumb')}

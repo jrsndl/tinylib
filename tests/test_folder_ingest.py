@@ -201,3 +201,99 @@ class PairingTests(unittest.TestCase):
         self.assertEqual(sorted(job['category'] for job in jobs), ['fire', 'smoke'])
         with self.assertRaisesRegex(ValueError, 'Duplicate automatic asset name'):
             self.prepare({}, category='one')
+
+
+class StillFolderIngestTests(unittest.TestCase):
+    """Stills: every image file is an asset; components pair as for footage."""
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        (self.root / 'library').mkdir()
+        self.library = {'name': 'Stills', 'root': str(self.root / 'library')}
+        self.settings = {'_config_path': str(self.root / 'studio.json'),
+                         'libraries': [self.library], 'profiles': {'preview': {}}, 'tools': {}}
+        self.settings['_access'] = AccessControl(self.settings, identity='test', persist=False)
+
+    def touch(self, *names):
+        for name in names:
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b'x')
+
+    def prepare(self, folder, pairing, latlong=False, category='hdri'):
+        with patch('tinylib.metadata_scan.probe_image', return_value={'width': 4096, 'height': 2048}):
+            return make_folder_manifests(self.settings, self.library, category, str(self.root / folder),
+                                         'ACEScg', 'preview', pairing=pairing, kind='still', latlong=latlong)
+
+    def test_numbered_stills_stay_separate_assets(self):
+        self.touch('src/sky_01.exr', 'src/sky_02.exr', 'src/sky_03.jpg')
+        jobs = self.prepare('src', {'mode': 'separate'})
+        self.assertEqual([job['name'] for job in jobs], ['sky_01', 'sky_02', 'sky_03'])
+        for job in jobs:
+            self.assertEqual(job['kind'], 'still')
+            self.assertEqual(set(job['media']), {'proxy', 'thumb'})
+            self.assertIs(job['metadata']['is_equirectangular'], False)
+            self.assertEqual(job['metadata']['width'], 4096)
+
+    def test_latlong_flags_every_still_and_takes_only_exr_and_hdr_mains(self):
+        self.touch('src/sky.exr', 'src/dome.hdr', 'src/reference.jpg', 'src/proxy/sky.jpg', 'src/proxy/dome.jpg',
+                   'high/sky_16K.exr')
+        pairing = {'mode': 'separate', 'proxy': str(self.root / 'src/proxy'), 'highres': str(self.root / 'high')}
+        jobs = {job['name']: job for job in self.prepare('src', pairing, latlong=True)}
+        self.assertEqual(set(jobs), {'sky', 'dome'})  # reference.jpg and the proxies are not mains
+        self.assertTrue(all(job['metadata']['is_equirectangular'] is True for job in jobs.values()))
+        self.assertEqual(jobs['sky']['media']['proxy'], {'mode': 'supply', 'path': str((self.root / 'src/proxy/sky.jpg').resolve())})
+        self.assertEqual(jobs['sky']['media']['thumb']['mode'], 'generate')
+        self.assertEqual(jobs['sky']['preview_source'], 'proxy')
+        self.assertTrue(jobs['sky']['highres'].endswith('sky_16K.exr'))
+        self.assertEqual(jobs['dome']['highres'], '')
+
+    def test_same_folder_regexes_match_names(self):
+        self.touch('src/sky.exr', 'src/sky_proxy.jpg', 'src/sky_thumb.jpg', 'src/portrait.jpg')
+        pairing = {'mode': 'same', 'proxy': r'_proxy\.jpg$', 'thumb': r'_thumb\.jpg$'}
+        jobs = {job['name']: job for job in self.prepare('src', pairing)}
+        self.assertEqual(set(jobs), {'sky', 'portrait'})
+        self.assertTrue(jobs['sky']['media']['proxy']['path'].endswith('sky_proxy.jpg'))
+        self.assertTrue(jobs['sky']['media']['thumb']['path'].endswith('sky_thumb.jpg'))
+        self.assertEqual(jobs['portrait']['media']['proxy']['mode'], 'generate')
+
+    def test_same_folder_regexes_match_relative_paths_for_per_asset_folders(self):
+        # The layout of testdata/hdrilib: one folder per asset, a subfolder per component, same file names.
+        for name in ('bakery', 'canteen'):
+            self.touch('lib/%s/main/%s.exr' % (name, name), 'lib/%s/highres/%s.exr' % (name, name),
+                       'lib/%s/proxy/%s.jpg' % (name, name), 'lib/%s/thumb/%s.jpg' % (name, name))
+        pairing = {'mode': 'same', 'proxy': '/proxy/', 'highres': '/highres/', 'thumb': '/thumb/'}
+        jobs = {job['name']: job for job in self.prepare('lib', pairing, latlong=True, category={'parent': 2})}
+        self.assertEqual(set(jobs), {'bakery', 'canteen'})
+        job = jobs['bakery']
+        self.assertEqual(job['category'], 'bakery')
+        self.assertIn('/main/', job['source'].replace('\\', '/'))
+        self.assertIn('/highres/', job['highres'].replace('\\', '/'))
+        self.assertIn('/proxy/', job['media']['proxy']['path'].replace('\\', '/'))
+        self.assertIn('/thumb/', job['media']['thumb']['path'].replace('\\', '/'))
+
+    def test_supply_or_generate_per_preview(self):
+        self.touch('src/sky.exr', 'src/dome.exr', 'prox/sky.jpg', 'thumbs/sky.jpg', 'thumbs/dome.jpg')
+        base = {'mode': 'separate', 'proxy': str(self.root / 'prox'), 'thumb': str(self.root / 'thumbs')}
+        jobs = {job['name']: job for job in self.prepare('src', dict(base, use={'thumb': 'generate'}), latlong=True)}
+        self.assertEqual(jobs['sky']['media']['proxy']['mode'], 'supply')    # paired, else generate
+        self.assertEqual(jobs['dome']['media']['proxy']['mode'], 'generate')
+        self.assertEqual(jobs['sky']['media']['thumb']['mode'], 'generate')  # paired thumb ignored
+        with self.assertRaisesRegex(ValueError, 'dome.exr: no paired proxy'):
+            self.prepare('src', dict(base, use={'proxy': 'supply'}), latlong=True)
+        jobs = self.prepare('src', dict(base, use={'thumb': 'supply'}), latlong=True)
+        self.assertTrue(all(job['media']['thumb']['mode'] == 'supply' for job in jobs))
+        with self.assertRaisesRegex(ValueError, 'paired, supply or generate'):
+            self.prepare('src', dict(base, use={'proxy': 'maybe'}), latlong=True)
+
+    def test_latlong_is_for_stills_only(self):
+        self.touch('src/plate.mov')
+        with self.assertRaisesRegex(ValueError, 'Only Stills'):
+            make_folder_manifests(self.settings, self.library, 'x', str(self.root / 'src'), 'ACEScg', 'preview',
+                                  pairing={'mode': 'separate'}, kind='footage', latlong=True)
+
+    def test_no_mains_is_reported(self):
+        self.touch('src/reference.jpg')
+        with self.assertRaisesRegex(ValueError, 'no supported EXR or HDR'):
+            self.prepare('src', {'mode': 'separate'}, latlong=True)

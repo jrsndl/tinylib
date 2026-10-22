@@ -24,9 +24,22 @@ variables, command-line options, ``*.local.json`` overrides and the
 """
 import configparser
 import re
+import sys
 from pathlib import Path
 
-APP_ROOT = Path(__file__).resolve().parent.parent
+
+def app_root():
+    """The TinyLib install folder: the repository, or the folder of a frozen TinyLib.exe.
+
+    A frozen exe unpacks its modules into a private folder, so tinylib.ini, config\\
+    and actions\\ are looked up beside the exe instead.
+    """
+    if getattr(sys, 'frozen', False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
+APP_ROOT = app_root()
 INSTALL_FILENAME = 'tinylib.ini'
 
 

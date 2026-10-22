@@ -211,6 +211,192 @@ def sort_library(settings, access, library, override=False, progress=None):
         release_edit_lock(handle)
 
 
+LABEL_REPLACEMENTS = 3
+
+
+def label_from_name(name, separators=True, camel_case=True, replacements=()):
+    """A display label made from an asset name.
+
+    Applied in this order, as the Labels from names tool previews it:
+
+    1. ``camel_case``: a space before a capital that follows a lowercase letter or digit, and
+       that capital in lowercase: ``abandonedBakery`` -> ``abandoned bakery``. An acronym is
+       kept: ``HDRISky`` -> ``HDRI sky``, ``skyHDRI`` -> ``sky HDRI``.
+    2. ``separators``: underscores and dashes become spaces.
+    3. ``replacements``: (search, replace) pairs of plain text, case-sensitive, in order;
+       an empty search is skipped.
+
+    Runs of spaces become one, and the ends are trimmed.
+    """
+    label = str(name)
+    if camel_case:
+        label = re.sub(r'([a-z0-9])([A-Z])(?=[a-z])', lambda m: m[1] + ' ' + m[2].lower(), label)
+        label = re.sub(r'([A-Z]{2,})([A-Z])(?=[a-z])', lambda m: m[1] + ' ' + m[2].lower(), label)
+        label = re.sub(r'([a-z0-9])(?=[A-Z]{2,})', r'\1 ', label)
+    if separators:
+        label = re.sub(r'[_-]+', ' ', label)
+    for search, replace in replacements:
+        if search:
+            label = label.replace(search, replace)
+    return re.sub(r'\s+', ' ', label).strip()
+
+
+def plan_labels(records, only_empty=True, **rules):
+    """[(record, new label)] for every record whose label the tool would change.
+
+    With ``only_empty``, records that already have a label are left alone. A label equal to
+    the name is not written: an empty label already shows the name.
+    """
+    from .asset_fields import validate_label
+    plan = []
+    for record in records:
+        current = record.get('label') if isinstance(record.get('label'), str) else ''
+        if only_empty and current.strip():
+            continue
+        name = str(record.get('name', ''))
+        label = label_from_name(name, **rules)
+        if label == name:
+            label = ''
+        if label == current.strip():
+            continue
+        validate_label(label)
+        plan.append((record, label))
+    return plan
+
+
+def label_library(settings, access, library, only_empty=True, rules=None, override=False, progress=None):
+    """Write labels made from asset names into one library, under the standard edit and write locks.
+
+    ``rules`` are the keyword arguments of ``label_from_name``. Returns the number of assets
+    and the ``[(asset id, old label, new label)]`` changes.
+    """
+    from .asset_edit import writable_library
+    from .edit_lock import acquire_edit_lock, assert_edit_write_allowed, release_edit_lock
+    from .library import atomic_json, library_lock
+    report = progress or (lambda message: None)
+    report('Checking library write access…')
+    require_admin(access)
+    config = writable_library(settings, access, {'library_root': library['root']})
+    report('Acquiring library edit lock…')
+    handle = acquire_edit_lock(config['root'], access.identity, override=override)
+    try:
+        with library_lock(config['root']):
+            assert_edit_write_allowed(config['root'], handle['token'])
+            report('Reading latest library database…')
+            database = Path(config['root']) / DATABASE_FILENAME
+            document = read_json(database)
+            if document.get('schema_version') != 3 or not isinstance(document.get('assets'), list):
+                raise ValueError('Labels from names requires a schema_version 3 tinylib_data.json.')
+            records = [record for record in document['assets'] if isinstance(record, dict)]
+            plan = plan_labels(records, only_empty, **(rules or {}))
+            changes = []
+            for record, label in plan:
+                changes.append((record.get('id', ''), record.get('label', ''), label))
+                if label:
+                    record['label'] = label
+                else:
+                    record.pop('label', None)
+            if changes:
+                report('Saving %d labels…' % len(changes))
+                atomic_json(database, document)
+            return {'assets': len(records), 'changes': changes}
+    finally:
+        release_edit_lock(handle)
+
+
+KEYWORD_REPLACEMENTS = 3
+NUMBER_KEYWORD = re.compile(r'^\d+([.,]\d+)?$')
+
+
+def keyword_list(text):
+    """Comma-separated keywords as a list: trimmed, lowercase, without empty ones."""
+    return [part.strip().lower() for part in str(text or '').split(',') if part.strip()]
+
+
+def clean_keywords(tags, remove_numbers=True, replacements=(), add=()):
+    """A cleaned keyword list, in the original order.
+
+    1. ``remove_numbers``: keywords that are only a number (``01``, ``2525``, ``1.5``) go.
+    2. ``replacements``: (search, replace) pairs, in order. ``search`` matches a whole keyword,
+       ignoring case. An empty ``replace`` removes the keyword; a comma-separated one becomes
+       several keywords (``abandonedbakery`` -> ``abandoned, bakery``). An empty search is skipped.
+    3. ``add``: keywords added at the end (lowercase), unless the asset already has them.
+
+    Keywords are trimmed, empty ones dropped, and the same keyword (ignoring case) kept once.
+    """
+    result = [str(tag).strip() for tag in tags if str(tag).strip()]
+    if remove_numbers:
+        result = [tag for tag in result if not NUMBER_KEYWORD.match(tag)]
+    for search, replace in replacements:
+        search = str(search).strip().casefold()
+        if not search:
+            continue
+        replaced = []
+        for tag in result:
+            if tag.casefold() == search:
+                replaced.extend(keyword_list(replace))
+            else:
+                replaced.append(tag)
+        result = replaced
+    result += [str(tag).strip().lower() for tag in add if str(tag).strip()]
+    unique, seen = [], set()
+    for tag in result:
+        if tag.casefold() not in seen:
+            seen.add(tag.casefold())
+            unique.append(tag)
+    return unique
+
+
+def plan_keywords(records, remove_numbers=True, replacements=(), add=()):
+    """[(record, new keyword list)] for every record whose keywords the cleaner would change."""
+    plan = []
+    for record in records:
+        tags = record.get('tags') if isinstance(record.get('tags'), list) else []
+        cleaned = clean_keywords(tags, remove_numbers, replacements, add)
+        if cleaned != tags:
+            plan.append((record, cleaned))
+    return plan
+
+
+def clean_library_keywords(settings, access, library, asset_ids=None, remove_numbers=True, replacements=(),
+                           override=False, progress=None, add=()):
+    """Clean the keywords of one library, or only of the assets with ``asset_ids`` in it, under
+    the standard edit and write locks. Returns the number of assets in scope and the
+    ``[(asset id, old keywords, new keywords)]`` changes.
+    """
+    from .asset_edit import writable_library
+    from .edit_lock import acquire_edit_lock, assert_edit_write_allowed, release_edit_lock
+    from .library import atomic_json, library_lock
+    report = progress or (lambda message: None)
+    report('Checking library write access…')
+    require_admin(access)
+    config = writable_library(settings, access, {'library_root': library['root']})
+    report('Acquiring library edit lock…')
+    handle = acquire_edit_lock(config['root'], access.identity, override=override)
+    try:
+        with library_lock(config['root']):
+            assert_edit_write_allowed(config['root'], handle['token'])
+            report('Reading latest library database…')
+            database = Path(config['root']) / DATABASE_FILENAME
+            document = read_json(database)
+            if document.get('schema_version') != 3 or not isinstance(document.get('assets'), list):
+                raise ValueError('Keyword cleaner requires a schema_version 3 tinylib_data.json.')
+            records = [record for record in document['assets'] if isinstance(record, dict)]
+            if asset_ids is not None:
+                wanted = set(asset_ids)
+                records = [record for record in records if record.get('id') in wanted]
+            changes = []
+            for record, tags in plan_keywords(records, remove_numbers, replacements, add):
+                changes.append((record.get('id', ''), list(record.get('tags') or []), tags))
+                record['tags'] = tags
+            if changes:
+                report('Saving keywords of %d assets…' % len(changes))
+                atomic_json(database, document)
+            return {'assets': len(records), 'changes': changes}
+    finally:
+        release_edit_lock(handle)
+
+
 def create_new_library(settings, access, name, root, template_root=None, read_only=None, progress=None):
     """Initialize an empty database and register it in studio/security config."""
     import copy

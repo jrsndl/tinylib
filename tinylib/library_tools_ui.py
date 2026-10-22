@@ -4,7 +4,10 @@ import copy
 from pathlib import Path
 
 from .qt import QtCore, QtGui, QtWidgets
-from .library_tools import CrosscheckCancelled, crosscheck_library, sort_library, create_new_library
+from .access import root_key
+from .library_tools import (KEYWORD_REPLACEMENTS, keyword_list, LABEL_REPLACEMENTS, CrosscheckCancelled, clean_library_keywords,
+                            crosscheck_library, create_new_library, label_library, plan_keywords, plan_labels,
+                            sort_library)
 from .edit_lock import LibraryEditLocked
 from .metadata_scan import format_scan_summary, scan_assets
 
@@ -412,6 +415,348 @@ class CreateLibraryDialog(QtWidgets.QDialog):
         else:
             self.inputs.setEnabled(True)
             self.create_button.setEnabled(True)
+
+    def reject(self):
+        if self.worker is None or not self.worker.isRunning():
+            super().reject()
+
+    def closeEvent(self, event):
+        if self.worker is not None and self.worker.isRunning():
+            event.ignore()
+        else:
+            super().closeEvent(event)
+
+
+class LabelWorker(QtCore.QThread):
+    progress = QtCore.Signal(str)
+    completed = QtCore.Signal(object)
+    failed = QtCore.Signal(object)
+
+    def __init__(self, library, settings, access, only_empty, rules, override=False, parent=None):
+        super().__init__(parent)
+        self.library, self.settings, self.access = library, settings, copy.copy(access)
+        self.only_empty, self.rules, self.override = only_empty, rules, override
+
+    def run(self):
+        try:
+            self.completed.emit(label_library(self.settings, self.access, self.library, self.only_empty,
+                                              self.rules, self.override, self.progress.emit))
+        except Exception as error:
+            self.failed.emit(error)
+
+
+class LabelsDialog(QtWidgets.QDialog):
+    """Labels from names: make asset labels from asset names in one library, with a preview."""
+    PREVIEW_ROWS = 500
+
+    def __init__(self, libraries, assets, settings, access, current_root='', parent=None):
+        super().__init__(parent)
+        self.libraries, self.assets, self.settings, self.access = libraries, assets, settings, access
+        self.result, self.error, self.worker = None, None, None
+        self.setWindowTitle('Labels from names')
+        self.resize(820, 640)
+        layout = QtWidgets.QVBoxLayout(self)
+        form = QtWidgets.QFormLayout()
+        self.library = QtWidgets.QComboBox()
+        for library in libraries:
+            self.library.addItem(library['name'], library)
+        current = next((index for index, library in enumerate(libraries)
+                        if current_root and root_key(library['root']) == root_key(current_root)), 0)
+        self.library.setCurrentIndex(current)
+        form.addRow('Library', self.library)
+        self.only_empty = QtWidgets.QCheckBox('Only assets with an empty label')
+        self.only_empty.setChecked(True)
+        self.only_empty.setToolTip('Off: labels you or others set by hand are replaced too.')
+        form.addRow('', self.only_empty)
+        self.separators = QtWidgets.QCheckBox('Replace underscores and dashes with spaces')
+        self.separators.setChecked(True)
+        form.addRow('', self.separators)
+        self.camel_case = QtWidgets.QCheckBox('Split words at capitals ("abandonedBakery" → "abandoned bakery")')
+        self.camel_case.setChecked(True)
+        form.addRow('', self.camel_case)
+        self.replacements = []
+        for index in range(LABEL_REPLACEMENTS):
+            row = QtWidgets.QHBoxLayout()
+            search, replace = QtWidgets.QLineEdit(), QtWidgets.QLineEdit()
+            search.setPlaceholderText('Search (plain text, case-sensitive)')
+            replace.setPlaceholderText('Replace with (empty: remove)')
+            row.addWidget(search, 1)
+            row.addWidget(QtWidgets.QLabel('→'))
+            row.addWidget(replace, 1)
+            form.addRow('Replace %d' % (index + 1), row)
+            self.replacements.append((search, replace))
+        layout.addLayout(form)
+        order = QtWidgets.QLabel('Applied in order: split at capitals, underscores and dashes, then replacements '
+                                 '1 to 3; repeated spaces become one. A label equal to the name is left empty.')
+        order.setWordWrap(True)
+        layout.addWidget(order)
+        self.preview = QtWidgets.QTreeWidget()
+        self.preview.setHeaderLabels(['Name', 'Current label', 'New label'])
+        self.preview.setRootIsDecorated(False)
+        self.preview.setUniformRowHeights(True)
+        self.preview.setColumnWidth(0, 260)
+        self.preview.setColumnWidth(1, 220)
+        layout.addWidget(self.preview, 1)
+        self.summary = QtWidgets.QLabel()
+        self.summary.setWordWrap(True)
+        layout.addWidget(self.summary)
+        self.progress_bar = QtWidgets.QProgressBar()
+        self.progress_bar.setRange(0, 0)
+        self.progress_bar.hide()
+        layout.addWidget(self.progress_bar)
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+        self.apply_button = buttons.addButton('Apply labels', QtWidgets.QDialogButtonBox.AcceptRole)
+        self.apply_button.clicked.connect(self.apply)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.close_button = buttons.button(QtWidgets.QDialogButtonBox.Close)
+        self.timer = QtCore.QTimer(self)
+        self.timer.setSingleShot(True)
+        self.timer.setInterval(150)
+        self.timer.timeout.connect(self.update_preview)
+        for widget in (self.only_empty, self.separators, self.camel_case):
+            widget.toggled.connect(self.timer.start)
+        for search, replace in self.replacements:
+            search.textChanged.connect(self.timer.start)
+            replace.textChanged.connect(self.timer.start)
+        self.library.currentIndexChanged.connect(self.timer.start)
+        self.update_preview()
+
+    def rules(self):
+        return {'separators': self.separators.isChecked(), 'camel_case': self.camel_case.isChecked(),
+                'replacements': [(search.text(), replace.text()) for search, replace in self.replacements]}
+
+    def library_assets(self):
+        library = self.library.currentData()
+        if library is None:
+            return []
+        return [asset for asset in self.assets if root_key(asset.get('library_root', '')) == root_key(library['root'])]
+
+    def update_preview(self):
+        self.preview.clear()
+        assets = self.library_assets()
+        try:
+            plan = plan_labels(assets, self.only_empty.isChecked(), **self.rules())
+        except ValueError as error:
+            self.summary.setText('Cannot make labels: %s' % error)
+            self.apply_button.setEnabled(False)
+            return
+        items = []
+        for record, label in plan[:self.PREVIEW_ROWS]:
+            items.append(QtWidgets.QTreeWidgetItem([str(record.get('name', '')), str(record.get('label') or ''),
+                                                    label or '(empty: shows the name)']))
+        self.preview.addTopLevelItems(items)
+        shown = '' if len(plan) <= self.PREVIEW_ROWS else ' The first %d are listed.' % self.PREVIEW_ROWS
+        self.summary.setText('%d of %d assets get a new label.%s' % (len(plan), len(assets), shown)
+                             if plan else 'No asset in this library gets a new label.')
+        self.apply_button.setEnabled(bool(plan) and self.library.currentData() is not None)
+
+    def apply(self, override=False):
+        library = self.library.currentData()
+        if library is None:
+            return
+        self.error, self.result = None, None
+        for widget in (self.apply_button, self.close_button, self.library):
+            widget.setEnabled(False)
+        self.progress_bar.show()
+        self.worker = LabelWorker(library, self.settings, self.access, self.only_empty.isChecked(), self.rules(),
+                                  override, self)
+        self.worker.progress.connect(self.summary.setText)
+        self.worker.completed.connect(lambda result: setattr(self, 'result', result))
+        self.worker.failed.connect(lambda error: setattr(self, 'error', error))
+        self.worker.finished.connect(self.finished_labels)
+        self.worker.start()
+
+    def finished_labels(self):
+        self.progress_bar.hide()
+        for widget in (self.close_button, self.library):
+            widget.setEnabled(True)
+        if self.result is not None:
+            self.summary.setText('%d labels written to %s.' % (len(self.result['changes']),
+                                                              self.library.currentData()['name']))
+            self.apply_button.setEnabled(False)
+            return
+        if (isinstance(self.error, LibraryEditLocked) and self.access.is_admin
+                and self.parentWidget() is not None
+                and self.parentWidget().confirm_edit_override(self.error.locks)):
+            return self.apply(override=True)
+        self.summary.setText('Labels from names failed: ' + str(self.error))
+        self.apply_button.setEnabled(True)
+
+    def reject(self):
+        if self.worker is None or not self.worker.isRunning():
+            super().reject()
+
+    def closeEvent(self, event):
+        if self.worker is not None and self.worker.isRunning():
+            event.ignore()
+        else:
+            super().closeEvent(event)
+
+
+class KeywordWorker(QtCore.QThread):
+    progress = QtCore.Signal(str)
+    completed = QtCore.Signal(object)
+    failed = QtCore.Signal(object)
+
+    def __init__(self, library, settings, access, asset_ids, remove_numbers, replacements, override=False,
+                 parent=None, add=()):
+        super().__init__(parent)
+        self.library, self.settings, self.access = library, settings, copy.copy(access)
+        self.asset_ids, self.remove_numbers, self.replacements = asset_ids, remove_numbers, replacements
+        self.override, self.add = override, add
+
+    def run(self):
+        try:
+            self.completed.emit(clean_library_keywords(self.settings, self.access, self.library, self.asset_ids,
+                                                       self.remove_numbers, self.replacements, self.override,
+                                                       self.progress.emit, self.add))
+        except Exception as error:
+            self.failed.emit(error)
+
+
+class KeywordsDialog(QtWidgets.QDialog):
+    """Keyword cleaner: one library at a time; only the selected assets when some of it is selected."""
+    PREVIEW_ROWS = 500
+
+    def __init__(self, libraries, assets, selected, settings, access, current_root='', parent=None):
+        super().__init__(parent)
+        self.libraries, self.assets, self.settings, self.access = libraries, assets, settings, access
+        self.selected = selected
+        self.result, self.error, self.worker = None, None, None
+        self.setWindowTitle('Keyword cleaner')
+        self.resize(820, 640)
+        layout = QtWidgets.QVBoxLayout(self)
+        form = QtWidgets.QFormLayout()
+        self.library = QtWidgets.QComboBox()
+        for library in libraries:
+            self.library.addItem(library['name'], library)
+        roots = [current_root] + [asset.get('library_root', '') for asset in selected]
+        current = next((index for root in roots if root for index, library in enumerate(libraries)
+                        if root_key(library['root']) == root_key(root)), 0)
+        self.library.setCurrentIndex(current)
+        form.addRow('Library', self.library)
+        self.scope = QtWidgets.QLabel()
+        self.scope.setWordWrap(True)
+        form.addRow('Works on', self.scope)
+        self.remove_numbers = QtWidgets.QCheckBox('Remove keywords that are only a number (01, 2525, 1.5)')
+        self.remove_numbers.setChecked(True)
+        form.addRow('', self.remove_numbers)
+        self.replacements = []
+        for index in range(KEYWORD_REPLACEMENTS):
+            row = QtWidgets.QHBoxLayout()
+            search, replace = QtWidgets.QLineEdit(), QtWidgets.QLineEdit()
+            search.setPlaceholderText('Keyword (whole keyword, any case)')
+            replace.setPlaceholderText('Replace with (empty: remove; commas: several)')
+            row.addWidget(search, 1)
+            row.addWidget(QtWidgets.QLabel('→'))
+            row.addWidget(replace, 1)
+            form.addRow('Replace %d' % (index + 1), row)
+            self.replacements.append((search, replace))
+        self.add = QtWidgets.QLineEdit()
+        self.add.setPlaceholderText('Keywords to add to every asset in scope, separated by commas')
+        form.addRow('Add keywords', self.add)
+        layout.addLayout(form)
+        self.preview = QtWidgets.QTreeWidget()
+        self.preview.setHeaderLabels(['Asset', 'Keywords now', 'New keywords'])
+        self.preview.setRootIsDecorated(False)
+        self.preview.setUniformRowHeights(True)
+        self.preview.setColumnWidth(0, 230)
+        self.preview.setColumnWidth(1, 260)
+        layout.addWidget(self.preview, 1)
+        self.summary = QtWidgets.QLabel()
+        self.summary.setWordWrap(True)
+        layout.addWidget(self.summary)
+        self.progress_bar = QtWidgets.QProgressBar()
+        self.progress_bar.setRange(0, 0)
+        self.progress_bar.hide()
+        layout.addWidget(self.progress_bar)
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+        self.apply_button = buttons.addButton('Apply keywords', QtWidgets.QDialogButtonBox.AcceptRole)
+        self.apply_button.clicked.connect(self.apply)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.close_button = buttons.button(QtWidgets.QDialogButtonBox.Close)
+        self.timer = QtCore.QTimer(self)
+        self.timer.setSingleShot(True)
+        self.timer.setInterval(150)
+        self.timer.timeout.connect(self.update_preview)
+        self.remove_numbers.toggled.connect(self.timer.start)
+        self.add.textChanged.connect(self.timer.start)
+        for search, replace in self.replacements:
+            search.textChanged.connect(self.timer.start)
+            replace.textChanged.connect(self.timer.start)
+        self.library.currentIndexChanged.connect(self.update_preview)
+        self.update_preview()
+
+    def rules(self):
+        return {'remove_numbers': self.remove_numbers.isChecked(),
+                'replacements': [(search.text(), replace.text()) for search, replace in self.replacements],
+                'add': keyword_list(self.add.text())}
+
+    def in_library(self, assets):
+        library = self.library.currentData()
+        if library is None:
+            return []
+        return [asset for asset in assets if root_key(asset.get('library_root', '')) == root_key(library['root'])]
+
+    def scope_assets(self):
+        """(assets in scope, selected only): the selected assets of this library, or all of it."""
+        selected = self.in_library(self.selected)
+        return (selected, True) if selected else (self.in_library(self.assets), False)
+
+    def update_preview(self):
+        self.preview.clear()
+        assets, only_selected = self.scope_assets()
+        library = self.library.currentData() or {'name': ''}
+        self.scope.setText(('<b>%d selected asset%s</b> in %s. Clear the selection to clean the whole library.'
+                            % (len(assets), '' if len(assets) == 1 else 's', library['name'])) if only_selected else
+                           ('<b>The whole library</b>: %d assets in %s (nothing of it is selected).'
+                            % (len(assets), library['name'])))
+        plan = plan_keywords(assets, **self.rules())
+        items = [QtWidgets.QTreeWidgetItem([str(record.get('label') or record.get('name', '')),
+                                            ', '.join(record.get('tags') or []), ', '.join(tags) or '(none)'])
+                 for record, tags in plan[:self.PREVIEW_ROWS]]
+        self.preview.addTopLevelItems(items)
+        shown = '' if len(plan) <= self.PREVIEW_ROWS else ' The first %d are listed.' % self.PREVIEW_ROWS
+        self.summary.setText('%d of %d assets get new keywords.%s' % (len(plan), len(assets), shown)
+                             if plan else 'No keyword changes.')
+        self.apply_button.setEnabled(bool(plan))
+
+    def apply(self, override=False):
+        library = self.library.currentData()
+        if library is None:
+            return
+        assets, only_selected = self.scope_assets()
+        ids = [asset.get('id') for asset in assets] if only_selected else None
+        self.error, self.result = None, None
+        for widget in (self.apply_button, self.close_button, self.library):
+            widget.setEnabled(False)
+        self.progress_bar.show()
+        rules = self.rules()
+        self.worker = KeywordWorker(library, self.settings, self.access, ids, rules['remove_numbers'],
+                                    rules['replacements'], override, self, rules['add'])
+        self.worker.progress.connect(self.summary.setText)
+        self.worker.completed.connect(lambda result: setattr(self, 'result', result))
+        self.worker.failed.connect(lambda error: setattr(self, 'error', error))
+        self.worker.finished.connect(self.finished_keywords)
+        self.worker.start()
+
+    def finished_keywords(self):
+        self.progress_bar.hide()
+        for widget in (self.close_button, self.library):
+            widget.setEnabled(True)
+        if self.result is not None:
+            self.summary.setText('Keywords of %d assets saved in %s.' % (len(self.result['changes']),
+                                                                         self.library.currentData()['name']))
+            self.apply_button.setEnabled(False)
+            return
+        if (isinstance(self.error, LibraryEditLocked) and self.access.is_admin
+                and self.parentWidget() is not None
+                and self.parentWidget().confirm_edit_override(self.error.locks)):
+            return self.apply(override=True)
+        self.summary.setText('Keyword cleaner failed: ' + str(self.error))
+        self.apply_button.setEnabled(True)
 
     def reject(self):
         if self.worker is None or not self.worker.isRunning():

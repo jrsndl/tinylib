@@ -8,10 +8,13 @@ tests/test_common_fields.py
 tests/test_core.py
 tests/test_create_library.py
 tests/test_deadline_submission.py
+tests/test_delete_assets.py
 tests/test_edit_lock.py
 tests/test_folder_ingest.py
+tests/test_hdri.py
 tests/test_ingest_metadata.py
 tests/test_install.py
+tests/test_label.py
 tests/test_library_sort.py
 tests/test_library_tools.py
 tests/test_metadata_scan.py
@@ -21,6 +24,7 @@ tests/test_path_format.py
 tests/test_preferences_filters.py
 tests/test_storage.py
 tests/test_thumbnail_cache.py
+tests/test_vfx_backend.py
 tinylib/__init__.py
 tinylib/access.py
 tinylib/access_ui.py
@@ -31,6 +35,7 @@ tinylib/asset_edit.py
 tinylib/asset_fields.py
 tinylib/asset_types.py
 tinylib/collection_ui.py
+tinylib/delete_ui.py
 tinylib/edit_lock.py
 tinylib/filters.py
 tinylib/ingest.py
@@ -43,6 +48,8 @@ tinylib/log.py
 tinylib/media_probe.py
 tinylib/metadata_scan.py
 tinylib/nuke_bridge.py
+tinylib/pano.py
+tinylib/pano_player.py
 tinylib/path_format.py
 tinylib/player.py
 tinylib/preferences.py
@@ -56,6 +63,7 @@ tinylib/standalone.qss
 tinylib/storage.py
 tinylib/thumbnail_cache.py
 tinylib/tile_text.py
+tinylib/trim.py
 tinylib/ui.py
 tinylib/views.py
 tinylib.egg-info/PKG-INFO
@@ -63,3 +71,5 @@ tinylib.egg-info/SOURCES.txt
 tinylib.egg-info/dependency_links.txt
 tinylib.egg-info/requires.txt
 tinylib.egg-info/top_level.txt
+tinylib/icons/arrow_down.png
+tinylib/icons/arrow_down_disabled.png

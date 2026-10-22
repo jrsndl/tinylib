@@ -4,7 +4,10 @@ import json
 import re
 from .qt import QtCore, QtWidgets
 from .preferences import asset_key
-from .asset_fields import DEFAULT_FIELDS, LABEL_MAX, MULTILINE_FIELDS, apply_defaults
+from .asset_fields import DEFAULT_FIELDS, LABEL_MAX, MULTILINE_FIELDS, apply_defaults, asset_parts
+
+# Read-only rows at the top of the panel; never edited.
+SUMMARY_KEYS = ('name', 'library', 'category', 'kind', 'parts', 'range')
 
 
 def visible_metadata(key, value):
@@ -51,7 +54,7 @@ class PropertiesEditor(QtWidgets.QWidget):
         self.form.setVerticalSpacing(5)
         self.form.setHorizontalSpacing(8)
         for label, key in [('Name', 'name'), ('Library', 'library'), ('Category', 'category'), ('Type', 'kind'),
-                           ('Range', 'range'), ('Color space', 'colorspace'),
+                           ('Parts', 'parts'), ('Range', 'range'), ('Color space', 'colorspace'),
                            ('Keywords', 'tags')]:
             if key == 'tags':
                 field = QtWidgets.QPlainTextEdit()
@@ -65,7 +68,10 @@ class PropertiesEditor(QtWidgets.QWidget):
             if key != 'tags':
                 field.setMinimumHeight(34)
             self.fields[key] = field
-            target = self.summary if key in ('name', 'library', 'category', 'kind', 'range') else self.form
+            if key == 'parts':
+                field.setToolTip('Components and their file types: main first, then the others '
+                                 'alphabetically. Thumbnail and filmstrip are not listed.')
+            target = self.summary if key in SUMMARY_KEYS else self.form
             target.addRow(label, field)
         content_layout.addLayout(self.summary)
         separator = QtWidgets.QFrame()
@@ -122,6 +128,8 @@ class PropertiesEditor(QtWidgets.QWidget):
         for key, field in self.fields.items():
             value = ('%s-%s' % (asset.get('first'), asset.get('last'))
                      if key == 'range' and asset.get('kind') == 'footage' else asset.get(key, ''))
+            if key == 'parts':
+                value = asset_parts(asset) if asset else ''
             if key == 'tags':
                 value = ', '.join(value)
             if isinstance(field, QtWidgets.QCheckBox):
@@ -172,7 +180,7 @@ class PropertiesEditor(QtWidgets.QWidget):
             values = []
             for asset in self.assets:
                 value = ('%s-%s' % (asset.get('first'), asset.get('last')) if key == 'range'
-                         else asset.get(key, ''))
+                         else asset_parts(asset) if key == 'parts' else asset.get(key, ''))
                 value = ', '.join(value) if key == 'tags' else str(value)
                 if value not in values:
                     values.append(value)
@@ -181,7 +189,9 @@ class PropertiesEditor(QtWidgets.QWidget):
                 keywords = dict.fromkeys(keyword.strip() for value in values
                                          for keyword in value.split(',') if keyword.strip())
                 text = ', '.join(keywords)
-            elif len(values) > 1 and key not in ('name', 'library', 'category', 'kind', 'range'):
+            elif key == 'parts':
+                text = ' | '.join(values)
+            elif len(values) > 1 and key not in SUMMARY_KEYS:
                 # Editable field with differing values: start empty so typing replaces them all,
                 # instead of writing the joined text ("ACEScg sRGB") into every asset.
                 text = ''
@@ -226,7 +236,7 @@ class PropertiesEditor(QtWidgets.QWidget):
         self.style_field(key, field)
 
     def style_field(self, key, field):
-        immutable = key in ('name', 'library', 'category', 'kind', 'range')
+        immutable = key in SUMMARY_KEYS
         style = 'color: #888; background: #252525;' if immutable else ''
         if isinstance(field, QtWidgets.QPlainTextEdit):
             style = 'background-color: #5c5c5c;'
@@ -246,7 +256,7 @@ class PropertiesEditor(QtWidgets.QWidget):
         self.label_field.setVisible(label)
         self.label_editing.emit(label)
         for key, field in self.fields.items():
-            enabled = self.editing and key not in ('name', 'library', 'category', 'kind', 'range') and self.field_allowed(key)
+            enabled = self.editing and key not in SUMMARY_KEYS and self.field_allowed(key)
             if len(self.assets) > 1 and not isinstance(field, (QtWidgets.QLineEdit, QtWidgets.QPlainTextEdit)):
                 enabled = False
             if isinstance(field, QtWidgets.QCheckBox):

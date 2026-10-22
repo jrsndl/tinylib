@@ -12,6 +12,7 @@ from .filters import duration
 from .preferences import ASSET_MIME, COLLECTION_MIME
 from .tile_text import DEFAULT_TEMPLATE, render_template, validate_template
 from .asset_fields import display_name
+from .asset_types import is_latlong
 from .path_format import format_assets
 from .thumbnail_cache import cache_root, cached_image_path
 from pathlib import Path
@@ -74,7 +75,7 @@ QWidget#browser, QSplitter#panels, QSplitter#panels::handle { background: #19191
 QWidget#panel { background: #282828; border: 1px solid #3f3f3f; border-radius: 4px; }
 QWidget#browser > QLabel#muted { background: transparent; padding-left: 4px; }
 QTreeWidget#categories { border: 0; }
-QDoubleSpinBox#filterValue { padding: 7px 8px; min-height: 18px; }
+QLineEdit#filterValue { padding: 7px 8px; min-height: 18px; }
 QLineEdit#search { padding: 7px 10px; min-height: 18px; }
 QTreeWidget#categories QHeaderView::section { border: 0; border-bottom: 1px solid #3f3f3f; }
 '''
@@ -402,7 +403,7 @@ class Cards(QtWidgets.QStyledItemDelegate):
 
     def sizeHint(self, option, index):
         lines = len(validate_template(self.template).split('\n')) if self.template else 0
-        caption = lines * 21 + 36 if self.info else 0
+        caption = lines * 21 + 6 if self.info else 0  # the rating is drawn on the image
         return QtCore.QSize(self.width, int(self.width * .5625) + caption)
 
     def paint(self, painter, option, index):
@@ -427,6 +428,14 @@ class Cards(QtWidgets.QStyledItemDelegate):
             painter.setPen(QtGui.QColor('#707070'))
             loading = any(asset.get(role) in self.cache.pending for role in ('thumb', 'filmstrip'))
             painter.drawText(image_rect, QtCore.Qt.AlignCenter, 'Loading preview…' if loading else 'Preview unavailable')
+        if is_latlong(asset):
+            badge = QtCore.QRect(image_rect.x() + 6, image_rect.y() + 6, 34, 18)
+            painter.fillRect(badge, QtGui.QColor(0, 0, 0, 170))
+            painter.setPen(QtGui.QColor('#e0b47a'))
+            painter.drawText(badge, QtCore.Qt.AlignCenter, '360')
+        rating = max(0, min(5, int(asset.get('_rating', 0) or 0)))
+        if rating:
+            paint_rating(painter, image_rect, rating)
         if is_marked(index):
             paint_marked(painter, image_rect)
         if self.info:
@@ -435,19 +444,28 @@ class Cards(QtWidgets.QStyledItemDelegate):
             for line, text in enumerate(lines):
                 painter.setPen(QtGui.QColor('#ececec' if line == 0 else '#a6a6a6'))
                 painter.drawText(rect.x()+10, image_rect.bottom()+21*(line+1), metrics.elidedText(text, QtCore.Qt.ElideRight, rect.width()-20))
-            rating = max(0, min(5, int(asset.get('_rating', 0))))
-            painter.setRenderHint(QtGui.QPainter.Antialiasing)  # Smooth stars only.
-            painter.setPen(QtGui.QPen(QtGui.QColor('#969696'), 1.2))
-            for star in range(5):
-                painter.setBrush(QtGui.QColor('#a6a6a6') if star < rating else QtCore.Qt.NoBrush)
-                center = QtCore.QPointF(rect.x()+18+star*22, rect.bottom()-14)
-                points = []
-                for point in range(10):
-                    angle = point * math.pi / 5 - math.pi / 2
-                    radius = 8 if point % 2 == 0 else 3.6
-                    points.append(center + QtCore.QPointF(radius*math.cos(angle), radius*math.sin(angle)))
-                painter.drawPolygon(QtGui.QPolygonF(points))
         painter.restore()
+
+
+def paint_rating(painter, image_rect, rating):
+    """The personal star rating on a tile's image, top right, like the 360 badge top left.
+    Only rated assets show it."""
+    step, outer, inner = 13, 5.6, 2.5
+    badge = QtCore.QRect(image_rect.right() - 6 - (5 * step + 6), image_rect.y() + 6, 5 * step + 6, 18)
+    painter.save()
+    painter.fillRect(badge, QtGui.QColor(0, 0, 0, 170))
+    painter.setRenderHint(QtGui.QPainter.Antialiasing)  # Smooth stars only.
+    painter.setPen(QtGui.QPen(QtGui.QColor('#e0b47a'), 1.0))
+    for star in range(5):
+        painter.setBrush(QtGui.QColor('#e0b47a') if star < rating else QtCore.Qt.NoBrush)
+        center = QtCore.QPointF(badge.x() + 3 + step / 2 + star * step, badge.center().y() + 1)
+        points = []
+        for point in range(10):
+            angle = point * math.pi / 5 - math.pi / 2
+            radius = outer if point % 2 == 0 else inner
+            points.append(center + QtCore.QPointF(radius * math.cos(angle), radius * math.sin(angle)))
+        painter.drawPolygon(QtGui.QPolygonF(points))
+    painter.restore()
 
 
 class TinyPreview(QtWidgets.QStyledItemDelegate):

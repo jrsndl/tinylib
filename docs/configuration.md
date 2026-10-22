@@ -90,6 +90,7 @@ Loading also fails when `extension_groups` is not an object, names an unknown gr
 | `action_roots` | list of folder paths | `["{app}/actions"]` | Folders of action packages; see [action packages](actions-and-access.md#action-packages). |
 | `tile_template` | string | `{name}\n{type} · {width} × {height}` | Initial tile caption template. A user's own **Tile text…** setting wins. An invalid template falls back to the default. Tokens are listed in the [user guide](user-guide.md#tile-text). |
 | `player_backend` | `"interactive"` or `"ffplay"` | `"interactive"` | `"ffplay"` launches the external ffplay player instead of the built-in review player. Any other value means interactive. |
+| `pano_max_width` | integer | `8192` | Widest main or highres the [360 viewer](user-guide.md#360-viewer) shows unreduced. A wider one is downsized by a whole number (16384 → 8192). Each 8192 × 4096 main uses about 130 MB of graphics memory. |
 | `library_defaults` | object | `{}` | Starting entry for **Create new library…** with "Studio defaults", for example `{"read_only": false, "legacy_roots": []}`. Copied as written; name and root come from the dialog. |
 | `access` | object | | Ignored, unless this file is also the security file. |
 | `security_config` | | | Ignored. The security file is chosen only by `tinylib.ini`. |
@@ -125,9 +126,9 @@ Set tools in the `[tools]` section of [`tinylib.ini`](#tinylibini). Because that
 
 | Key | Default | Used for |
 | --- | --- | --- |
-| `ffmpeg` | `ffmpeg` | Generating proxies, thumbnails and filmstrips; decoding in the review player. |
+| `ffmpeg` | `ffmpeg` | Generating proxies, thumbnails and filmstrips; decoding in the review player; reading HDR mains in the 360 viewer. |
 | `ffprobe` | `ffprobe` | Probing containers (ingest, Rescan metadata) and checking generated media. The player uses `ffprobe` beside `ffmpeg` when this key is not set. |
-| `oiiotool` | `oiiotool` | Color conversion of image files; probing images and sequences. |
+| `oiiotool` | `oiiotool` | Color conversion of image files; probing images and sequences; reading a main the 360 viewer's FFmpeg cannot read without converting it. |
 | `vfx_transcode` | `vfx-transcode` | Proxies, thumbnails and filmstrips of EXR image sequences; see `proxy_backend` under [profiles](#profiles). When it is not found on a worker, that worker uses the built-in path. Needs version 2026.09 or newer. |
 | `ffplay` | `ffplay` beside `ffmpeg`, else `ffplay` on PATH | Only with `"player_backend": "ffplay"`. |
 | `ocio` | the profile's `ocio_config` | OCIO config file for every processing profile on this machine; overrides `ocio_config`. A path, or a built-in config such as `ocio://studio-config-latest` (OCIO 2.2+). Set it on farm workers that have no `OCIO` environment variable. |
@@ -156,6 +157,7 @@ The ingest form lists profiles by name. The worker looks the same name up in its
 | `color_args` | list of strings | `["--colorconvert", "{input_colorspace}", "{output_colorspace}"]` | oiiotool arguments for the color conversion. `{input_colorspace}` is the main color space chosen at ingest; `{output_colorspace}` is `output_colorspace`. An empty list is an error. |
 | `thumbnail_frame` | `"largest"` or `"middle"` | `"largest"` | Frame used for a generated thumbnail: the largest source file, or the middle frame. |
 | `proxy_backend` | `"vfx_transcode"` or `"builtin"` | automatic | How the previews of EXR image sequences are made. vfx-transcode makes the proxy, filmstrip and thumbnail in one `tools.vfx_transcode` run: the frames are converted once, in the worker's local temp folder, at the size the proxy shows. With `preview_source` `proxy` the filmstrip is read from the new proxy in the same run and the thumbnail is taken from the proxy. Anamorphic footage is made square-pixel. A frame that fails to convert fails the ingest. **Not set:** vfx-transcode when it is installed on the worker and `color_args` is the default; otherwise built-in. **`"vfx_transcode"`:** always; the ingest fails if vfx-transcode is missing or `color_args` is customised. **`"builtin"`:** one oiiotool run per frame. A display-referred main (a movie, or a DPX, TIFF, PNG or JPG sequence) is first converted to `working_colorspace` EXRs in the worker's temp folder. With a supplied proxy, thumbnail and filmstrip come from the proxy and vfx-transcode is not run. Stills always use the built-in path. |
+| `latlong_proxy_size` | `[width, height]`, 2:1 | `[4096, 2048]` | Size of the proxy generated for a lat-long Still (HDRI). Its thumbnail is 960 × 480. |
 | `working_colorspace` | string | `ACES - ACEScg` | Scene-linear colour space that display-referred mains (movies, PNG/TIFF/DPX/JPG sequences) are converted to before vfx-transcode makes their previews. Use the name from the OCIO config. |
 | `display`, `view`, `looks` | strings | not used | vfx-transcode only: convert with an OCIO display/view (ACES 1.3+ configs) instead of `output_colorspace`. `""` means the config's default. |
 | `description` | string | | Informational only; TinyLib does not display or use it. |

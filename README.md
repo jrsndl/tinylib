@@ -1,6 +1,6 @@
 # TinyLib
 
-TinyLib is a studio asset library for VFX footage, stills, models and other assets. It runs inside Nuke or as a standalone Qt browser, with search, filters, collections and a review player. Ingest jobs run as Deadline tasks that generate previews and publish into shared libraries. Access is controlled by Windows identity and an admin-owned security file.
+TinyLib is a studio asset library for VFX footage, stills, models and other assets. It runs inside Nuke or as a standalone Qt browser, with search, filters, collections, a review player and a 360 viewer for HDRIs (lat-long stills). Ingest jobs run as Deadline tasks that generate previews and publish into shared libraries. Access is controlled by Windows identity and an admin-owned security file.
 
 ## Quick start
 
@@ -30,7 +30,7 @@ Python 3.9+ and PySide6 or PySide2 are needed for the standalone browser. Inside
    python -m tinylib.admin add-user "<your account>"
    ```
 
-4. Start the browser: double-click `launch_studio.bat` on Windows, or run `python launch.py` (`python launch.py --config path/to/studio.json` for another browser configuration).
+4. Start the browser: double-click `launch_studio.bat` on Windows (with uv installed, it first installs any missing packages), or run `python launch.py` (`python launch.py --config path/to/studio.json` for another browser configuration).
 
 5. For Nuke, add the folder that **contains** the `tinylib` package to the studio `init.py`, not the `tinylib` folder itself:
 

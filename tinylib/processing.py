@@ -8,7 +8,7 @@ import uuid
 from fractions import Fraction
 from pathlib import Path
 from .library import Library, atomic_json, read_json, safe_component, sequence_files, split_sequence
-from .asset_types import extension_groups, validate_metadata
+from .asset_types import extension_groups, validate_metadata, is_latlong, is_two_to_one
 from .media_probe import CONVERSION_TIMEOUT, PROBE_TIMEOUT, number, pixel_aspect
 from .log import get_logger
 
@@ -92,6 +92,28 @@ def printf_pattern(path):
     """``plate.1001.exr`` -> ``plate.%04d.exr``, the frame counter as oiiotool and FFmpeg read it."""
     path = Path(path)
     return path.with_name(re.sub(r'(\d+)(?=\.[^.]+$)', lambda m: '%%0%dd' % len(m[1]), path.name, count=1))
+
+
+THUMB_SIZE = (960, 506)
+LATLONG_THUMB_SIZE = (960, 480)
+LATLONG_PROXY_SIZE = (4096, 2048)
+
+
+def preview_sizes(job):
+    """(proxy, thumbnail) sizes generated for a job. Lat-long stills stay 2:1.
+
+    A profile may set ``latlong_proxy_size``, e.g. ``[8192, 4096]``.
+    """
+    if is_latlong(job):
+        size = job.get('profile', {}).get('latlong_proxy_size') or LATLONG_PROXY_SIZE
+        try:
+            size = (int(size[0]), int(size[1]))
+        except (TypeError, ValueError, IndexError):
+            raise ValueError('latlong_proxy_size must be [width, height]; got %r.' % (size,))
+        if not (size[0] > 0 and is_two_to_one(*size)):
+            raise ValueError('latlong_proxy_size must be 2:1, e.g. [4096, 2048]; got %r.' % (size,))
+        return size, LATLONG_THUMB_SIZE
+    return (1920, 1080), THUMB_SIZE
 
 
 def fit_filter(width, height):
@@ -351,18 +373,19 @@ class Processor:
                      '-preset', 'faster', '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
                      '-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709', proxy])
             else:
-                self.image(sources[0], proxy, (1920, 1080))
+                self.image(sources[0], proxy, preview_sizes(job)[0])
+        thumb_size = preview_sizes(job)[1]
         if outputs.get('thumb') and media['thumb']['mode'] == 'generate' and 'thumb' not in made:
             if self.profile.get('thumbnail_frame', 'largest') == 'largest':
                 chosen = max(range(len(sources)), key=lambda i: sources[i].stat().st_size)
             else:
                 chosen = (len(sources) - 1) // 2
             if job['preview_source'] == 'proxy' and proxy:
-                self.proxy_frame(proxy, chosen, (960, 506), outputs['thumb'])
+                self.proxy_frame(proxy, chosen, thumb_size, outputs['thumb'])
             elif container:
-                self.image(sources[0], outputs['thumb'], (960, 506), convert=False)
+                self.image(sources[0], outputs['thumb'], thumb_size, convert=False)
             else:
-                self.image(sources[chosen], outputs['thumb'], (960, 506))
+                self.image(sources[chosen], outputs['thumb'], thumb_size)
         if (footage and outputs.get('filmstrip') and media['filmstrip']['mode'] == 'generate'
                 and 'filmstrip' not in made):
             if container:
@@ -391,10 +414,26 @@ class Processor:
 
 
 def validate_media(outputs, manifest):
+    """Check generated and supplied previews.
+
+    Footage previews have fixed sizes. A Still's proxy may be any size. A lat-long
+    Still's proxy and thumbnail may be any size but must be 2:1 lat-long images.
+    """
     if manifest['kind'] not in ('still', 'footage'):
         return
-    sizes = {'thumb': (960, 506), 'proxy': (1920, 1080), 'filmstrip': (11520, 270)}
+    latlong = is_latlong(manifest)
+    sizes = {'thumb': THUMB_SIZE, 'proxy': (1920, 1080), 'filmstrip': (11520, 270)}
+    if manifest['kind'] == 'still':
+        sizes.pop('proxy')
+    if latlong:
+        sizes.pop('thumb')
     for key, path in outputs.items():
+        if latlong and key in ('proxy', 'thumb'):
+            info = probe(path, manifest['tools'])
+            if not is_two_to_one(info['width'], info['height']):
+                raise ValueError('The %s of a lat-long still must be 2:1; got %sx%s.'
+                                 % (key, info['width'], info['height']))
+            continue
         if key not in sizes:
             continue
         info = probe(path, manifest['tools'], count=key == 'proxy' and manifest['kind'] == 'footage')
@@ -560,6 +599,9 @@ def process(manifest_path, access=None, settings=None):
                             pixel_aspect=pixel_aspect(main_info.get('sample_aspect_ratio', '1:1')))
             groups = extension_groups({'extension_groups': job.get('extension_groups', {})})
             metadata['is_raw'] = sources[0].suffix.lower().lstrip('.') in groups.get('extensions_stills_raw', [])
+            if is_latlong(job) and not is_two_to_one(metadata['width'], metadata['height']):
+                print('Warning: lat-long main is %dx%d, not 2:1; ingest will continue.'
+                      % (metadata['width'], metadata['height']), flush=True)
             if job['kind'] == 'footage':
                 frame_rate, frames, seconds = footage_timing(job, main_info, first, last)
                 metadata.update(frame_rate=frame_rate, duration_frames=frames,

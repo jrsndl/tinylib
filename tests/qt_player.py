@@ -211,4 +211,35 @@ controller.stop()
 pump()
 assert not controller.windows
 
-print('Interactive player passed:', QtCore.__name__, 'exact frames, autoplay, JKL, speed reset, steps, overlay, scrub, loop on/off, stills, cleanup')
+# PgUp/PgDn: the window asks for the previous/next asset; its replacement takes its place and size.
+steps = []
+controller.navigate_requested.connect(lambda asset, step, source: steps.append((asset['name'], step, source)))
+controller.play({'name': 'First', 'proxy': str(media), 'kind': 'footage', 'first': 1001})
+wait(lambda: bool(controller.windows), 'navigation player launch')
+first = next(iter(controller.windows))
+first.setGeometry(120, 140, 700, 420)
+pump()
+QTest.keyClick(first, QtCore.Qt.Key_PageDown)
+QTest.keyClick(first, QtCore.Qt.Key_PageUp)
+assert [(name, step) for name, step, _ in steps] == [('First', 1), ('First', -1)], steps
+assert steps[0][2] is first
+QTest.keyClick(first, QtCore.Qt.Key_K)  # stopped, without loop: the next asset opens the same way
+first.loop_toggle.setChecked(False)
+controller.play({'name': 'Second', 'proxy': str(media), 'kind': 'footage', 'first': 1001}, replace=first)
+QTest.keyClick(first, QtCore.Qt.Key_PageDown)  # ignored while its replacement opens
+wait(lambda: len(controller.windows) == 1 and first not in controller.windows, 'replacement window')
+second = next(iter(controller.windows))
+assert second.windowTitle().endswith('Second')
+assert second.geometry().size() == QtCore.QSize(700, 420), second.geometry()
+assert len(steps) == 2, steps
+assert second.direction == 0 and not second.loop and not second.loop_toggle.isChecked()
+QTest.keyClick(second, QtCore.Qt.Key_J)  # reverse playback carries over too
+controller.play({'name': 'Third', 'proxy': str(media), 'kind': 'footage', 'first': 1001}, replace=second)
+wait(lambda: len(controller.windows) == 1 and second not in controller.windows, 'second replacement window')
+third = next(iter(controller.windows))
+assert third.direction == -1 and third.current == third.out_point, (third.direction, third.current)
+controller.stop()
+pump()
+assert not controller.windows
+
+print('Interactive player passed:', QtCore.__name__, 'exact frames, autoplay, JKL, speed reset, steps, overlay, scrub, loop on/off, stills, PgUp/PgDn replacement keeping play state, cleanup')

@@ -48,9 +48,15 @@ tinylib.show()                            # or tinylib.show("<path to a browser 
 
 ## Standalone browser
 
-On Windows, double-click `launch_studio.bat`. It uses `.venv\Scripts\python.exe` when present, then `python` on PATH, then the Windows Python launcher (`py -3`). Startup errors stay visible in the console. Elsewhere, run `python launch.py`.
+On Windows, double-click `launch_studio.bat`. When [uv](https://docs.astral.sh/uv/) is on PATH it first runs `uv sync --extra pyside6 --inexact`, which installs whatever `.venv` is missing (PySide6, numpy for the 360 viewer) and removes nothing; if that fails, for example on a share the account cannot write, it starts with what is installed. It then uses `.venv\Scripts\python.exe` when present, then `python` on PATH, then the Windows Python launcher (`py -3`). Startup errors stay visible in the console. Elsewhere, run `python launch.py`.
 
 The standalone browser needs Python 3.9+ and PySide6 or PySide2 (`uv sync --extra pyside6`, or `pip install -e ".[pyside6]"`; see [development](development.md#packaging)).
+
+### Standalone exe
+
+`build.bat` freezes the browser into `dist\TinyLib\TinyLib.exe`, which runs without Python. It needs [uv](https://docs.astral.sh/uv/) on the build machine: it runs `uv sync --extra pyside6 --group build`, then PyInstaller. `build.bat console` makes an exe with a console window, to read startup errors.
+
+Copy the whole `dist\TinyLib` folder; `TinyLib.exe` needs the `_internal` folder beside it. The exe reads `tinylib.ini`, `config\` and `actions\` from its own folder, the same files `launch.py` reads from the repository, so set up `tinylib.ini` there from `tinylib.ini.example`. The build never copies your own `tinylib.ini` or `*.local.json` files. The exe uses PySide6. The Deadline worker is not part of it: Deadline still runs `worker.py` with its own Python.
 
 ## Local thumbnail cache
 

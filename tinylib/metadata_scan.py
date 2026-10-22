@@ -115,6 +115,22 @@ def scan_source_metadata(value, settings):
     return metadata
 
 
+def scan_still_metadata(path, settings):
+    """Probe one still image for ingest. A still oiiotool cannot read keeps the defaults;
+    the farm worker measures it again when it publishes."""
+    sample = Path(path)
+    tools = settings.get('tools', {})
+    try:
+        metadata = probe_image(sample, tools.get('oiiotool', 'oiiotool'))
+    except Exception:
+        metadata = {}
+    metadata.pop('frame_rate', None)
+    metadata['is_raw'] = sample.suffix.casefold().lstrip('.') in extension_groups(settings)['extensions_stills_raw']
+    metadata['file_size_main'] = sample.stat().st_size
+    metadata['file_size_total'] = metadata['file_size_main']
+    return metadata
+
+
 def _tree_size(path):
     path = Path(path)
     if path.is_file():

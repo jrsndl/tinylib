@@ -62,7 +62,7 @@ def load_settings(path=None, install=None):
     """
     install = install if isinstance(install, dict) else read_install(install)
     path = Path(path or os.environ.get('TINYLIB_CONFIG') or install.get('config') or
-                Path(__file__).resolve().parent.parent / 'config' / 'studio.json')
+                APP_ROOT / 'config' / 'studio.json')
     local = path.with_name(path.stem + '.local' + path.suffix)
     if local.is_file():
         path = local

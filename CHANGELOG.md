@@ -2,7 +2,32 @@
 
 ## Unreleased
 
+### Library tools
+
+- **Keyword cleaner…** cleans the keywords of one library, or only of its selected assets: removes number-only keywords and applies three whole-keyword replacements (empty removes, commas split), and adds comma-separated keywords to every asset in scope, with a live preview.
+- **Labels from names…** makes asset labels from asset names in one library: only empty labels (default) or all, split words at capitals, underscores and dashes to spaces, and three search-and-replace pairs, with a live preview. Writes under the standard edit lock.
+
+### HDRI (lat-long stills)
+
+- A Still with `is_equirectangular` is a lat-long still (HDRI). The ingest form has a **Projection: Lat-long** checkbox for it, ticked automatically for a 2:1 EXR or HDR main. Its main must be EXR or HDR; the highres is optional and copied as it is.
+- Radiance `.hdr` is a Still extension (`extensions_stills`). A studio configuration that overrides `extensions_stills` needs `hdr` added.
+- Lat-long proxies and thumbnails are tonemapped 2:1 JPEGs. Generated ones are 4096 × 2048 (profile key `latlong_proxy_size`) and 960 × 480; supplied ones may be any 2:1 size, and one that is not 2:1 fails the ingest.
+- A Still's proxy is no longer checked against 1920 × 1080.
+- New 360 viewer for lat-long stills: look around from inside the sphere (drag, wheel for field of view), toggle between the proxy and the HDR main (button or Tab), set exposure and gamma on the main (sliders neutral in the middle; click a caption to reset it), flat view (F) with zoom and pan, linear pixel readout. **Use highres if available** (off by default) shows the highres instead of the main. The exposure and gamma sliders appear only for the HDR image. The main and highres views are not color accurate: no OCIO conversion or display transform, only exposure, gamma and the sRGB curve. OpenGL; the main is decoded in the background and downsized above `pano_max_width` (8192). Tiles of lat-long stills show a **360** badge.
+- The 360 viewer reads the main with FFmpeg in the main's own pixel format (for example `gbrapf16le` for a half-float EXR), never converted: FFmpeg's pixel-format conversion clamps floats to 1.0, which showed as clipped highlights when exposure was lowered. oiiotool reads a main FFmpeg cannot.
+- Folder ingest also works for Stills, in separate and same folder structure: every image file is an asset (numbered files are not joined into sequences), with proxy, highres and thumbnail paired as for footage. **Projection: Lat-long** flags the whole batch; then only EXR and HDR files are mains.
+- Folder ingest: a same-folder-structure regex also matches the path relative to the main folder (`/proxy/`), so HDRIs laid out one folder per asset with `main`, `proxy`, `thumb` and `highres` subfolders pair. In separate folder structure, component folders may sit inside the main folder, and their fields offer only **Folder…**.
+- Folder ingest: the Proxy, Thumb and Filmstrip rows choose **Paired, else generate** (default), **Supply (paired)** (every main must have one) or **Generate** (paired files ignored).
+- numpy is now part of the `pyside6` and `pyside2` extras (the 360 viewer decodes HDR mains with it; Nuke ships its own).
+- `launch_studio.bat` runs `uv sync --extra pyside6 --inexact` first when uv is installed, so missing packages (such as numpy) are installed before the browser starts.
+
+### Packaging
+
+- `build.bat` freezes the standalone browser into `dist\TinyLib\TinyLib.exe` with uv and PyInstaller, for machines without Python. A frozen exe reads `tinylib.ini`, `config\` and `actions\` from its own folder. PyInstaller is in a new `build` dependency group.
+
 ### Player
+
+- **PgUp / PgDn** in the review player and the 360 viewer open the previous / next asset in place, keeping the play state (playing or stopped, direction, speed, Loop, overlay) and the 360 viewer's flat view, proxy/HDR, highres and grading: from the current collection, the collection's assets; from the main view or the Properties panel, what the main view shows (filtered and sorted). Both ends wrap.
 
 - In and out points for footage: **I** / **O** set them at the current frame, **Alt+X** clears them, and the player plays and loops only from in to out. They are personal, stored in your preferences beside ratings, never in the library database.
 - Collections keep their own in and out points per asset (copied from yours when an asset is added); a player opened from a collection uses and edits them, and collection export/import carries them. Collection files are now version 2; version 1 files still import.
@@ -10,6 +35,11 @@
 - Copied and dragged paths, and the Copy paths action, use the in and out points as the frame range in the Nuke, AYON and Flame notations. Actions receive a `trim` function in their context.
 
 ### Interface
+
+- The properties panel shows a read-only **Parts** row below Type: the asset's components and file types, main first, e.g. `main:exr highres:exr proxy:jpg`. Thumbnail and filmstrip are not listed.
+- The Stars filter is the same five stars as **Rate selection**: click a star to show assets with at least that many stars, click it again or **Any** for every rating. It replaces the operator and number.
+- Fixed: the Length, Width and Stars numbers still could not be typed into. They are plain number fields now instead of spin boxes; clearing a number sets the rule back to Any.
+- Tiles show the star rating in the top right corner of the preview (rated assets only, also with Info off), instead of a star row under the caption. Captions are shorter by that row.
 
 - Fixed: the Length, Width and Stars numbers could not be typed into until an operator was chosen. They are always editable now; typing a number while the operator is Any selects `>` (length, width) or `=` (stars).
 - The **Details** button that shows or hides the asset panel is renamed **Properties**, so it is no longer confused with the Details view mode.

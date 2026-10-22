@@ -6,8 +6,10 @@ Requires-Python: >=3.9
 Description-Content-Type: text/markdown
 Provides-Extra: pyside6
 Requires-Dist: PySide6>=6.5; extra == "pyside6"
+Requires-Dist: numpy>=1.21; extra == "pyside6"
 Provides-Extra: pyside2
 Requires-Dist: PySide2>=5.15; extra == "pyside2"
+Requires-Dist: numpy>=1.21; extra == "pyside2"
 Provides-Extra: dev
 Requires-Dist: ruff>=0.6; extra == "dev"
 
@@ -34,7 +36,7 @@ Python 3.9+ and PySide6 or PySide2 are needed for the standalone browser. Inside
 
    Use the `pyside2` extra instead for Nuke 15's Python.
 
-2. Copy `tinylib.ini.example` to `tinylib.ini` beside `menu.py` and set `security` (and optionally `config`). For a local trial, use the commented lines at the bottom of the example, which point both at `config/studio.json`.
+2. Copy `tinylib.ini.example` to `tinylib.ini` beside `menu.py` and set `security` (and optionally `config`), and the paths of ffmpeg, ffprobe, oiiotool and vfx-transcode under `[tools]`. For a local trial, use the commented lines at the bottom of the example, which point both at `config/studio.json`.
 
 3. Add yourself as the first administrator. Without this, TinyLib starts with no access.
 

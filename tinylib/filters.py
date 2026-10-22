@@ -30,7 +30,8 @@ def compare(value, operator, threshold):
         return True
     if value is None:
         return False
-    return {'>': value > threshold, '<': value < threshold, '=': value == threshold}[operator]
+    return {'>': value > threshold, '<': value < threshold, '=': value == threshold,
+            '>=': value >= threshold}[operator]
 
 
 def accepts(asset, query='', invert=False, tags=(), length=('', 0), width=('', 0), stars=('', 0), rating=0):

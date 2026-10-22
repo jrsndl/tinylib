@@ -121,5 +121,16 @@ class InstallTests(unittest.TestCase):
         self.assertFalse(access.can(self.library, 'view'))
 
 
+class FrozenAppRootTests(unittest.TestCase):
+    def test_frozen_exe_looks_beside_itself(self):
+        import sys
+        from tinylib.install import app_root
+        with tempfile.TemporaryDirectory() as folder:
+            exe = Path(folder) / 'TinyLib.exe'
+            with patch.object(sys, 'frozen', True, create=True), patch.object(sys, 'executable', str(exe)):
+                self.assertEqual(app_root(), Path(folder).resolve())
+        self.assertEqual(app_root(), Path(__file__).resolve().parents[1])
+
+
 if __name__ == '__main__':
     unittest.main()

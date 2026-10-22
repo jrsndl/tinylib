@@ -75,11 +75,10 @@ for mode in ['Details', 'List', 'Tiles']:
     assert {asset_key(a) for a in window.selected_assets()} == selected_keys
     if mode == 'List':
         assert window.grid.visualRect(window.model.index(1, 0)).x() > window.grid.visualRect(window.model.index(0, 0)).x()
-window.stars_filter.value.setValue(3)
-window.stars_filter.operator.setCurrentIndex(1)
+QTest.mouseClick(window.stars_filter.buttons[3], QtCore.Qt.LeftButton)  # at least 4 stars
 assert window.model.rowCount() == 2
-window.stars_filter.operator.setCurrentIndex(2)
-assert window.model.rowCount() == 1
+QTest.mouseClick(window.stars_filter.buttons[3], QtCore.Qt.LeftButton)  # again: any rating
+assert window.model.rowCount() == 3
 window.clear_filters()
 window.search.setText('bakery')
 window.filter()

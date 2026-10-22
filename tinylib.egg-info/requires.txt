@@ -4,6 +4,8 @@ ruff>=0.6
 
 [pyside2]
 PySide2>=5.15
+numpy>=1.21
 
 [pyside6]
 PySide6>=6.5
+numpy>=1.21

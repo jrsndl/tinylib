@@ -5,10 +5,10 @@ import threading
 from pathlib import Path
 from .qt import QtCore, QtWidgets, exec_dialog
 from .views import heading_font
-from .ingest import (PAIRED_ROLES, category_for, clean_asset_name, keywords_from_name, make_manifest,
+from .ingest import (FOLDER_KINDS, PAIRED_ROLES, category_for, paired_roles, clean_asset_name, keywords_from_name, make_manifest,
                      prepare_source, save_manifest, submit_deadline, submit_deadline_batch,
                      make_folder_manifests)
-from .asset_types import ASSET_TYPES, default_metadata
+from .asset_types import ASSET_TYPES, LATLONG_MAIN_EXTENSIONS, default_metadata, is_two_to_one
 from .metadata_scan import scan_source_metadata
 from .access import root_key
 
@@ -25,17 +25,18 @@ class IngestComboBox(QtWidgets.QComboBox):
 class PathField(QtWidgets.QWidget):
     selected = QtCore.Signal(str)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, files=True):
         super().__init__(parent)
         layout = QtWidgets.QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.edit = QtWidgets.QLineEdit()
-        button = QtWidgets.QPushButton('File…')
-        folder_button = QtWidgets.QPushButton('Folder…')
         layout.addWidget(self.edit, 1)
-        layout.addWidget(button)
+        if files:  # a folder-only field (folder batch components) has no File… button
+            button = QtWidgets.QPushButton('File…')
+            layout.addWidget(button)
+            button.clicked.connect(self.browse)
+        folder_button = QtWidgets.QPushButton('Folder…')
         layout.addWidget(folder_button)
-        button.clicked.connect(self.browse)
         folder_button.clicked.connect(self.browse_folder)
 
     def browse(self):
@@ -63,7 +64,8 @@ def folder_manifests(args, progress=None):
     """The folder batch for form arguments; ``args[13]`` carries ``{'pairing': ...}`` in batch mode."""
     options = args[13] if isinstance(args[13], dict) else {}
     return make_folder_manifests(args[0], args[1], args[3], args[4], args[6], args[7],
-                                 progress=progress, pairing=options.get('pairing'))
+                                 progress=progress, pairing=options.get('pairing'), kind=args[12],
+                                 latlong=options.get('is_equirectangular') is True)
 
 
 class Submission(QtCore.QThread):
@@ -334,9 +336,9 @@ class IngestDialog(QtWidgets.QDialog):
         self.source.selected.connect(self.source_selected)
         form.addRow('Main', self.source)
         self.batch_hint = QtWidgets.QLabel(
-            'Folder batch: each detected sequence/container becomes a separate Deadline job. Names, keywords '
-            'and FPS are automatic. Paired components are used as they are; what is missing is generated, '
-            'from the paired proxy when there is one.')
+            'Folder batch: each detected sequence or container (Footage), or each image file (Still), becomes '
+            'a separate Deadline job. Names, keywords and, for footage, FPS are automatic. Paired components '
+            'are used as they are; what is missing is generated, from the paired proxy when there is one.')
         self.batch_hint.setWordWrap(True)
         form.addRow('', self.batch_hint)
         self.batch_hint.hide()
@@ -347,23 +349,33 @@ class IngestDialog(QtWidgets.QDialog):
                                      'Same: the components are among the main files; a regex picks each.')
         form.addRow('Components are in', self.pairing_mode)
         self.pairing_fields = {}
-        examples = {'proxy': r'^.*\.mp4$', 'highres': r'^.*_8K.*\.exr$', 'thumb': r'^.*_thumb\.jpg$',
-                    'filmstrip': r'^.*_filmstrip\.jpg$'}
+        self.pairing_use = {}
         for role in PAIRED_ROLES:
             field = QtWidgets.QWidget()
             row = QtWidgets.QHBoxLayout(field)
             row.setContentsMargins(0, 0, 0, 0)
-            folder = PathField()
+            if role != 'highres':  # previews: use the paired file or generate; a highres is never generated
+                use = IngestComboBox()
+                use.addItem('Paired, else generate', 'auto')
+                use.addItem('Supply (paired)', 'supply')
+                use.addItem('Generate', 'generate')
+                use.setToolTip('Paired, else generate: the paired file when there is one.\n'
+                               'Supply: the paired file; a main without one stops the batch.\n'
+                               'Generate: always generated from the main; paired files are ignored '
+                               '(and still never ingested as mains).')
+                row.addWidget(use)
+                self.pairing_use[role] = use
+            folder = PathField(files=False)
             regex = QtWidgets.QLineEdit()
-            regex.setPlaceholderText('Regex, e.g. ' + examples[role] + ' (empty: not paired)')
             folder.edit.setPlaceholderText('Folder (empty: not paired)')
-            row.addWidget(folder)
-            row.addWidget(regex)
+            row.addWidget(folder, 1)
+            row.addWidget(regex, 1)
             form.addRow(role.capitalize(), field)
             self.pairing_fields[role] = field, folder, regex
         self.pairing_mode.currentIndexChanged.connect(self.update_pairing_mode)
         hint = QtWidgets.QLabel('Choose a still, sequence frame, footage container, asset file, or folder. '
-                                'Footage folders are searched recursively; image sequences are detected automatically.')
+                                'Footage and Still folders are searched recursively for a folder batch; '
+                                'image sequences are detected automatically for Footage.')
         hint.setWordWrap(True)
         form.addRow('', hint)
 
@@ -410,9 +422,16 @@ class IngestDialog(QtWidgets.QDialog):
             form.addRow(label, field)
             self.media[key] = mode, path
             self.media_rows[key] = field, form.labelForField(field)
+        self.latlong = QtWidgets.QCheckBox('Lat-long (equirectangular HDRI)')
+        self.latlong.setToolTip('Sets is_equirectangular. The main must be EXR or HDR; the proxy and thumbnail '
+                                'are tonemapped 2:1 lat-long JPEGs, of any size. Opens in the 360 viewer.\n'
+                                'Ticked automatically for a 2:1 EXR or HDR main.')
+        form.addRow('Projection', self.latlong)
         self.metadata = QtWidgets.QPlainTextEdit()
         self.metadata.setMaximumHeight(180)
         form.addRow('Type metadata (JSON)', self.metadata)
+        self.latlong.toggled.connect(self.set_latlong)
+        self.metadata.textChanged.connect(self.sync_latlong)
         self.proxy_warning = QtWidgets.QLabel()
         self.proxy_warning.setWordWrap(True)
         self.proxy_warning.setStyleSheet('color: #ffa02f;')
@@ -472,8 +491,45 @@ class IngestDialog(QtWidgets.QDialog):
         self.fps.setEnabled(kind == 'footage')
         self.color.setEnabled(visual)
         self.metadata.setPlainText(json.dumps(default_metadata(kind), indent=2))
+        self.show_latlong_row()
         if self.source.text():
             self.source_selected(self.source.text())
+
+    def show_latlong_row(self):
+        visible = self.kind.currentData() == 'still'  # also for a folder batch: every still is flagged
+        self.latlong.setVisible(visible)
+        self.form.labelForField(self.latlong).setVisible(visible)
+
+    def metadata_object(self):
+        try:
+            value = json.loads(self.metadata.toPlainText() or '{}')
+        except ValueError:
+            return None
+        return value if isinstance(value, dict) else None
+
+    def set_latlong(self, enabled):
+        """The checkbox writes is_equirectangular into the type metadata JSON."""
+        current = self.metadata_object()
+        if current is None:
+            self.status.setText('Type metadata is invalid JSON; fix it to change the projection.')
+        elif current.get('is_equirectangular') is not enabled:
+            current['is_equirectangular'] = enabled
+            self.metadata.setPlainText(json.dumps(current, indent=2))
+        self.update_preview_labels()
+
+    def sync_latlong(self):
+        current = self.metadata_object()
+        if current is not None:
+            blocked = self.latlong.blockSignals(True)
+            self.latlong.setChecked(current.get('is_equirectangular') is True)
+            self.latlong.blockSignals(blocked)
+        self.update_preview_labels()
+
+    def update_preview_labels(self):
+        latlong = self.kind.currentData() == 'still' and self.latlong.isChecked()
+        self.media_rows['proxy'][1].setText('Proxy · 2:1 lat-long, any size' if latlong else
+                                            'Proxy · any size' if self.kind.currentData() == 'still' else 'Proxy')
+        self.media_rows['thumb'][1].setText('Thumbnail · 2:1 lat-long, 960 × 480' if latlong else 'Thumbnail · 960 × 506')
 
     def refresh_categories(self, *_):
         self._category_request += 1
@@ -536,17 +592,31 @@ class IngestDialog(QtWidgets.QDialog):
             return {'parent': self.parent_levels.currentData()}
         return self.new_category_name.text().strip() if mode == 'new' else self.category.currentText().strip()
 
+    PAIRING_EXAMPLES = {
+        'footage': {'proxy': r'^.*\.mp4$', 'highres': r'^.*_8K.*\.exr$', 'thumb': r'^.*_thumb\.jpg$',
+                    'filmstrip': r'^.*_filmstrip\.jpg$'},
+        'still': {'proxy': r'^.*_proxy\.jpg$', 'highres': r'^.*_16K\.exr$', 'thumb': r'^.*_thumb\.jpg$'},
+    }
+
     def update_pairing_mode(self, *_):
         separate = self.pairing_mode.currentData() == 'separate'
-        for field, folder, regex in self.pairing_fields.values():
+        kind = self.kind.currentData()
+        roles = paired_roles(kind) if kind in FOLDER_KINDS else ()
+        examples = self.PAIRING_EXAMPLES.get(kind, {})
+        for role, (field, folder, regex) in self.pairing_fields.items():
             folder.setVisible(separate)
             regex.setVisible(not separate)
+            if role in examples:
+                regex.setPlaceholderText('Regex, e.g. ' + examples[role] + ' (empty: not paired)')
+            visible = bool(self._batch_folder) and role in roles
+            field.setVisible(visible)
+            self.form.labelForField(field).setVisible(visible)
 
     def pairing(self):
         mode = self.pairing_mode.currentData()
         values = {role: (folder.text() if mode == 'separate' else regex.text().strip())
                   for role, (field, folder, regex) in self.pairing_fields.items()}
-        return dict(values, mode=mode)
+        return dict(values, mode=mode, use={role: combo.currentData() for role, combo in self.pairing_use.items()})
 
     def set_batch_mode(self, enabled):
         self.batch_hint.setVisible(enabled)
@@ -567,6 +637,7 @@ class IngestDialog(QtWidgets.QDialog):
             visible = not enabled and role in ASSET_TYPES[self.kind.currentData()]['representations']
             field.setVisible(visible)
             label.setVisible(visible)
+        self.show_latlong_row()
 
     def source_selected(self, value):
         # editingFinished fires on every focus change; only a real change re-reads the source.
@@ -579,13 +650,14 @@ class IngestDialog(QtWidgets.QDialog):
         if not value:
             return
         try:
-            if self.kind.currentData() == 'footage' and Path(value).is_dir():
+            if self.kind.currentData() in FOLDER_KINDS and Path(value).is_dir():
                 self.source.edit.setText(value)
                 self._batch_folder = value
                 self.set_batch_mode(True)
                 self.invalidate_proxy()
                 self.status.setText('Folder batch selected. Choose where the proxies, highres and other '
-                                    'components are; Review job shows how they paired.')
+                                    'components are%s; Review job shows how they paired.'
+                                    % (', and tick Lat-long if they are HDRIs' if self.kind.currentData() == 'still' else ''))
                 return
             source = prepare_source(value, self.kind.currentData(), self.settings)
             self.source.edit.setText(source)
@@ -603,6 +675,9 @@ class IngestDialog(QtWidgets.QDialog):
             self.update_category_preview()
             if self.kind.currentData() == 'footage':
                 self.start_scan('main', source)
+            elif (self.kind.currentData() == 'still'
+                  and Path(source).suffix.lower().lstrip('.') in LATLONG_MAIN_EXTENSIONS):
+                self.start_scan('main', source)  # a 2:1 EXR/HDR is ticked as lat-long
             self.scan_proxy()
         except Exception as error:
             self._last_source = None
@@ -628,7 +703,7 @@ class IngestDialog(QtWidgets.QDialog):
         version = self._scan_versions[role]
         if role == 'main':
             self._main_scan_pending = True
-            self.status.setText('Scanning main footage metadata…')
+            self.status.setText('Scanning main metadata…')
         worker = MetadataScan(source, self.settings, self)
         self._scans.append(worker)
         worker.done.connect(lambda result: self.scan_finished(role, version, result))
@@ -650,6 +725,8 @@ class IngestDialog(QtWidgets.QDialog):
                 self.update_proxy_warning()
         elif error:
             self.status.setText('Could not scan main metadata: ' + error)
+        elif self.kind.currentData() == 'still':
+            self.still_scanned(metadata)
         else:
             try:
                 current = json.loads(self.metadata.toPlainText() or '{}')
@@ -663,6 +740,22 @@ class IngestDialog(QtWidgets.QDialog):
                                     'Main metadata loaded; no embedded FPS found. Set Sequence FPS manually.')
             except ValueError as error:
                 self.status.setText('Could not fill main metadata: ' + str(error))
+
+    def still_scanned(self, metadata):
+        """An EXR/HDR still: fill its size, and tick lat-long when it is 2:1."""
+        current = self.metadata_object()
+        if current is None:
+            self.status.setText('Main metadata scanned; type metadata is invalid JSON, so it was not filled.')
+            return
+        for key in ('width', 'height', 'pixel_aspect'):
+            if key in metadata:
+                current[key] = metadata[key]
+        two_to_one = bool(metadata.get('width')) and is_two_to_one(metadata['width'], metadata.get('height', 0))
+        if two_to_one:
+            current['is_equirectangular'] = True
+        self.metadata.setPlainText(json.dumps(current, indent=2))
+        self.status.setText('Main is %sx%s%s.' % (metadata.get('width'), metadata.get('height'),
+                            ', 2:1: marked lat-long (HDRI)' if two_to_one else ''))
 
     def scan_proxy(self, *_):
         self.invalidate_proxy()
@@ -704,7 +797,7 @@ class IngestDialog(QtWidgets.QDialog):
         if not self._batch_folder and not self.name.text().strip():
             raise ValueError('Enter an asset name before submitting.')
         if self._main_scan_pending:
-            raise ValueError('Main footage metadata is still being scanned. Please wait.')
+            raise ValueError('Main metadata is still being scanned. Please wait.')
         if self.library.currentData() is None:
             raise ValueError('No writable library is configured.')
         try:
@@ -715,6 +808,8 @@ class IngestDialog(QtWidgets.QDialog):
         if self._batch_folder:
             # Resolved per main file; the pairing travels where single jobs carry metadata.
             metadata = {'pairing': self.pairing()}
+            if self.kind.currentData() == 'still':
+                metadata['is_equirectangular'] = self.latlong.isChecked()
         else:
             category = category_for(category, self.source.text())
         if not category:
