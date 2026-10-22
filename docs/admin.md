@@ -6,7 +6,8 @@ Administrators see three extra controls; they are hidden for everyone else, and 
 
 - **Access rights…** edits users, groups, studio defaults and per-library grants in the security file. Saving needs membership of `admins` and Windows write permission on the file. Rows without an account name are rejected, and removing your own admin rights asks for confirmation.
 - **Configuration…** opens the active browser configuration file.
-- **Library tools**, beneath the library/category tree, described below.
+- **Library tools**, in the user menu at the bottom-left corner (your login name), described below.
+- **Login as…**, in the same user menu, lets you use TinyLib as another user from the security file would: their groups, libraries, actions and edit rights, with your admin controls hidden. The user menu then offers **Log out**, which brings you back to your own account. Your own preferences (ratings, collections) stay in use. Edit locks, the `ingest_user` of ingests and the log name both accounts, e.g. `studio\admin as studio\jan`. Login as and Log out are unavailable while editing.
 
 From a command prompt in the app folder, `python -m tinylib.admin` manages accounts without the browser:
 
@@ -19,7 +20,7 @@ python -m tinylib.admin remove-user "studio\joe"
 
 ## Library tools
 
-Only members of `admins` can use them. The button is hidden for other accounts, and every tool re-reads the security file when it starts, so an account removed from `admins` while TinyLib is open is refused at once.
+Only members of `admins` can use them. The menu entry is hidden for other accounts, and every tool re-reads the security file when it starts, so an account removed from `admins` while TinyLib is open is refused at once.
 
 ### Library crosscheck…
 

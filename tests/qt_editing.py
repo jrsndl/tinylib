@@ -15,7 +15,7 @@ from tinylib.library import atomic_json, read_json
 from tinylib.edit_lock import acquire_edit_lock, read_edit_locks
 from tinylib.preferences import Preferences
 from tinylib.path_format import format_assets
-from tinylib.ui import Browser
+from tinylib.ui import Browser, login_name
 from tinylib.views import STYLE, UI_FONT_FAMILY, UI_FONT_SIZE
 from helpers import test_access
 
@@ -40,9 +40,11 @@ preferences = folder / 'preferences.json'
 window = Browser(config, preferences, access=test_access(config))
 window.show()
 assert '#ffa02f' in window.styleSheet() and 'url(:images/' not in window.styleSheet()
-assert window.library_tools_button.isVisible()
-assert [action.text() for action in window.library_tools_button.menu().actions()] == [
-    'Library crosscheck…', 'Rescan metadata…', 'Library sort…', 'Create new library…']
+assert window.library_tools_menu.menuAction().isVisible()
+assert window.user_button.text() == login_name(window.access.identity)
+assert [action.text() for action in window.library_tools_menu.actions()] == [
+    'Library crosscheck…', 'Rescan metadata…', 'Library sort…', 'Labels from names…', 'Keyword cleaner…',
+    'Create new library…']
 assert 'font-size' not in STYLE and 'font-family' not in STYLE
 assert window.font().family() == UI_FONT_FAMILY and window.font().pointSize() == UI_FONT_SIZE
 

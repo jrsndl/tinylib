@@ -68,6 +68,8 @@ class AccessControl:
 
     def __init__(self, settings, identity=None, persist=True):
         self.identity = identity or windows_identity()
+        # Who is really signed in. ``identity`` differs only while an admin is logged in as another user.
+        self.real_identity = self.identity
         self.persist = persist
         self.error = None
         self.groups = set()
@@ -119,6 +121,46 @@ class AccessControl:
         self.groups = set(users.get(self.identity.casefold(), []))
         if not self.groups:
             self.error = 'Your account %s has no TinyLib access. Ask an administrator to add it.' % self.identity
+
+    @property
+    def acting_as(self):
+        """True while an admin is logged in as another user (see ``login_as``)."""
+        return self.identity.casefold() != self.real_identity.casefold()
+
+    @property
+    def actor(self):
+        """The identity for records and logs: "studio\\admin as studio\\jan" while logged in as someone else."""
+        return '%s as %s' % (self.real_identity, self.identity) if self.acting_as else self.identity
+
+    def users(self):
+        """The accounts listed in the security file."""
+        return sorted(self.data.get('access', {}).get('users', {}))
+
+    def login_as(self, identity):
+        """Let an admin use TinyLib with another user's groups and permissions, until ``logout``.
+
+        The real account must be an admin in the security file right now, and ``identity`` a listed user.
+        """
+        target = identity.strip().casefold()
+        current = self.identity
+        self.identity = self.real_identity
+        self.refresh()
+        if not self.is_admin:
+            raise PermissionError('Only administrators can log in as another user.')
+        if target not in {user.casefold() for user in self.users()}:
+            self.identity = current
+            self.refresh()
+            raise ValueError('%s is not a TinyLib user.' % identity)
+        self.identity = target
+        log.warning('%s logged in as %s', self.real_identity, target)
+        self.refresh()
+
+    def logout(self):
+        """Back to the real account after ``login_as``."""
+        if self.acting_as:
+            log.warning('%s logged out from %s', self.real_identity, self.identity)
+        self.identity = self.real_identity
+        self.refresh()
 
     @property
     def security_dir(self):

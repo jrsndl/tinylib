@@ -117,9 +117,10 @@ class ActionRegistry:
                     self.errors.append(str(manifest) + ': ' + str(error))
 
     def allowed(self, action, assets, access, host=None):
+        # Permissions are per library: check each library once, so a whole view stays fast.
+        roots = {asset['library_root'] for asset in assets}
         return (action.allow_only is None or bool(access.groups.intersection(action.allow_only))) and bool(assets) and action.accepts(assets, host) and all(
-            access.can(asset['library_root'], 'view') and access.can(asset['library_root'], 'action', action.id)
-            for asset in assets)
+            access.can(root, 'view') and access.can(root, 'action', action.id) for root in roots)
 
     def run(self, identifier, assets, access, context=None):
         access.refresh()
@@ -130,7 +131,7 @@ class ActionRegistry:
         if action.id != identifier or not self.allowed(action, assets, access):
             raise PermissionError('Action is not permitted for this selection.')
         config = read_json(action.config_path)
-        log.info('%s runs action %s on %d asset(s)', access.identity, action.id, len(assets))
+        log.info('%s runs action %s on %d asset(s)', getattr(access, 'actor', access.identity), action.id, len(assets))
         module_name = '_tinylib_action_' + uuid.uuid4().hex
         spec = importlib.util.spec_from_file_location(module_name, action.code)
         module = importlib.util.module_from_spec(spec)

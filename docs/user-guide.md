@@ -10,7 +10,7 @@ The left panel is an expanded tree of libraries and their categories. Select a l
 
 Inside Nuke there is one browser per session: choosing **TinyLib > Studio library** again brings the existing window to the front.
 
-During startup, the bottom status line reports the library being read, assets discovered, elapsed time, preview completion, local-cache hits, original-source reads, pending reads and unavailable previews. Hover over it to see library load errors, the local cache folder and the log file.
+During startup, the bottom status line reports the library being read, assets discovered, elapsed time, preview completion, local-cache hits, original-source reads, pending reads and unavailable previews. Hover over it to see library load errors, the local cache folder and the log file. Left of it, the user menu shows your login name without the domain; it lists your full account and groups and, for administrators, **Library tools**.
 
 ## Search
 
@@ -153,7 +153,7 @@ The viewer needs OpenGL 3.0. Decoding the main needs numpy, which Nuke and the s
 
 ## Actions and Nuke import
 
-The properties action dropdown runs a studio action on the main-view selection; the collection dropdown runs it on the whole collection. Bundled actions import main or highres into Nuke and copy paths. Main and highres imports create Read nodes with explicit frame ranges and color space; an unknown project color space is reported instead of silently using a different one. Which actions you see depends on your groups and the host (see [studio actions and access](actions-and-access.md)).
+The properties action dropdown runs a studio action on the main-view selection or, with nothing selected, on every asset the main view shows (filtered as it is); its first entry then reads **Pick action for all N shown…**, and running it on more than one asset asks first. The collection dropdown runs an action on the whole collection. Each dropdown remembers the last action you picked (in your user preferences) and preselects it whenever it is available. An action is listed only when it suits every asset it would run on (its asset filter) and the host. Bundled actions import main or highres into Nuke and copy paths. Main and highres imports create Read nodes with explicit frame ranges and color space; an unknown project color space is reported instead of silently using a different one. Which actions you see depends on your groups and the host (see [studio actions and access](actions-and-access.md)).
 
 ## Asset properties
 

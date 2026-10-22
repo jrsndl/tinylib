@@ -227,6 +227,12 @@ def panel_widget(widget=None):
     return widget
 
 
+
+def login_name(identity):
+    """The login name without the domain or computer: "studio\\jan" and "jan@studio.local" are "jan"."""
+    return identity.replace('/', '\\').rsplit('\\', 1)[-1].split('@', 1)[0] or identity
+
+
 class Browser(QtWidgets.QWidget):
     def __init__(self, config_path=None, preferences_path=None, access=None):
         super().__init__()
@@ -325,10 +331,20 @@ class Browser(QtWidgets.QWidget):
         self.categories.setHeaderLabel('LIBRARIES / CATEGORIES')
         self.categories.setMinimumWidth(170)
         library_layout.addWidget(self.categories, 1)
-        self.library_tools_button = QtWidgets.QToolButton()
-        self.library_tools_button.setText('Library tools')
-        self.library_tools_button.setPopupMode(QtWidgets.QToolButton.InstantPopup)
-        tools_menu = QtWidgets.QMenu(self.library_tools_button)
+        # The user menu in the bottom-left corner: the login name; Library tools for admins.
+        self.user_button = QtWidgets.QToolButton()
+        self.user_button.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.user_button.setAutoRaise(True)
+        user_menu = QtWidgets.QMenu(self.user_button)
+        self.user_info = user_menu.addAction('')
+        self.user_info.setEnabled(False)
+        user_menu.addSeparator()
+        # Admins only: use TinyLib as another user would, until Log out.
+        self.login_as_action = user_menu.addAction('Login as…')
+        self.login_as_action.triggered.connect(self.login_as)
+        self.logout_action = user_menu.addAction('Log out')
+        self.logout_action.triggered.connect(self.logout)
+        tools_menu = self.library_tools_menu = user_menu.addMenu('Library tools')
         crosscheck_action = tools_menu.addAction('Library crosscheck…')
         crosscheck_action.triggered.connect(self.library_crosscheck)
         rescan_action = tools_menu.addAction('Rescan metadata…')
@@ -341,9 +357,8 @@ class Browser(QtWidgets.QWidget):
         keywords_action.triggered.connect(self.keyword_cleaner)
         create_action = tools_menu.addAction('Create new library…')
         create_action.triggered.connect(self.create_new_library)
-        self.library_tools_button.setMenu(tools_menu)
-        self.library_tools_button.setVisible(self.access.is_admin)
-        library_layout.addWidget(self.library_tools_button)
+        tools_menu.menuAction().setVisible(self.access.is_admin)
+        self.user_button.setMenu(user_menu)
         self.splitter.addWidget(library_panel)
         main = panel_widget()
         main_layout = QtWidgets.QVBoxLayout(main)
@@ -391,6 +406,10 @@ class Browser(QtWidgets.QWidget):
         self.collections.actions.requested.connect(lambda identifier: self.run_action(identifier, collection=True))
         self.splitter.addWidget(self.collections)
         self.make_properties()
+        actions = self.preferences.data.get('display', {})
+        for picker, key in ((self.action_picker, 'last_action'), (self.collections.actions, 'last_collection_action')):
+            picker.preferred = actions.get(key) if isinstance(actions.get(key), str) else ''
+            picker.chosen.connect(lambda identifier, key=key: self.remember_action(key, identifier))
         self.splitter.setSizes([190, 1000, 0, 300])
         self.details_panel.setVisible(self.details_toggle.isChecked())
         self.details_toggle.toggled.connect(self.toggle_details)
@@ -398,8 +417,14 @@ class Browser(QtWidgets.QWidget):
         self.status = QtWidgets.QLabel('Loading libraries…')
         self.status.setObjectName('muted')
         self._asset_status = ''
+        self._asset_error = ''
+        self._preview_progress = None
         self.update_status_tooltip()
-        layout.addWidget(self.status)
+        bottom = QtWidgets.QHBoxLayout()
+        bottom.addWidget(self.user_button)
+        bottom.addWidget(self.status, 1)
+        layout.addLayout(bottom)
+        self.update_window_title()
         self.loading_timer = QtCore.QTimer(self)
         self.loading_timer.setInterval(250)
         self.loading_timer.timeout.connect(self.render_library_progress)
@@ -642,21 +667,32 @@ class Browser(QtWidgets.QWidget):
                                 (progress['index'], progress['total'], progress['name'],
                                  progress['library_assets'], progress['assets'], source, elapsed))
 
+    def status_head(self):
+        """Asset counts for the status line, with the selected count when anything is selected."""
+        selected = len(self.selected_assets())
+        return self._asset_status + (' · %d selected' % selected if selected else '') + self._asset_error
+
+    def refresh_status(self):
+        if self._preview_progress is not None:
+            self.preview_progress(self._preview_progress)
+
     def preview_progress(self, progress):
+        self._preview_progress = progress
         if not self._asset_status:
             return
+        head = self.status_head()
         unavailable = ' · %d unavailable' % progress['failures'] if progress['failures'] else ''
         if progress['pending']:
             self.status.setText('%s · previews %d/%d · %d local · %d source · %d pending · %.1f s%s' %
-                                (self._asset_status, progress['completed'], progress['requested'],
+                                (head, progress['completed'], progress['requested'],
                                  progress['disk_hits'], progress['source_loads'],
                                  progress['pending'], progress['seconds'], unavailable))
         elif progress['requested']:
             self.status.setText('%s · previews ready: %d local, %d source · %.1f s%s' %
-                                (self._asset_status, progress['disk_hits'],
+                                (head, progress['disk_hits'],
                                  progress['source_loads'], progress['seconds'], unavailable))
         else:
-            self.status.setText(self._asset_status + ' · waiting for visible previews…')
+            self.status.setText(head + ' · waiting for visible previews…')
         self.update_status_tooltip()
 
     def update_status_tooltip(self):
@@ -756,7 +792,8 @@ class Browser(QtWidgets.QWidget):
         error = '  ·  %d library error(s) — see tooltip' % len(self.errors) if self.errors else ''
         if self.access.error:
             error = '  ·  ' + self.access.error
-        self._asset_status = '%s assets / %s total · %s picked%s' % (len(result), len(self.assets), len(picked), error)
+        self._asset_status = '%s assets / %s total · %s collected' % (len(result), len(self.assets), len(picked))
+        self._asset_error = error
         self.preview_progress(self.cache.snapshot())
 
     def main_selected(self):
@@ -854,6 +891,7 @@ class Browser(QtWidgets.QWidget):
         for button in (self.preview_button, self.clear_stars, *self.star_buttons):
             button.setEnabled(bool(asset))
         self.update_actions()
+        self.refresh_status()
         ratings = {a.get('_rating', 0) for a in assets}
         rating = next(iter(ratings)) if len(ratings) == 1 else 0
         self.properties.setVisible(same_type)
@@ -911,7 +949,7 @@ class Browser(QtWidgets.QWidget):
         for widget in (self.refresh, self.ingest_button, self.categories, self.search,
                        self.tag_picker, self.kind,
                        self.length_filter, self.width_filter, self.stars_filter,
-                       self.library_tools_button):
+                       self.library_tools_menu.menuAction(), self.login_as_action, self.logout_action):
             widget.setEnabled(not editing)
         if not editing:
             self.ingest_button.setEnabled(any(
@@ -954,11 +992,11 @@ class Browser(QtWidgets.QWidget):
     def _acquire_edit_lock(self, library):
         """The library's edit lock; an administrator may take over someone else's."""
         try:
-            return acquire_edit_lock(library['root'], self.access.identity)
+            return acquire_edit_lock(library['root'], self.access.actor)
         except LibraryEditLocked as error:
             if not self.access.is_admin or not self.confirm_edit_override(error.locks):
                 raise
-            return acquire_edit_lock(library['root'], self.access.identity, override=True)
+            return acquire_edit_lock(library['root'], self.access.actor, override=True)
 
     def _activate_edit_assets(self, originals, selection_source):
         handles = {}
@@ -1266,6 +1304,13 @@ class Browser(QtWidgets.QWidget):
             except Exception as error:
                 self.show_error(str(error))
 
+    def remember_action(self, key, identifier):
+        """Keep the last picked action (properties or collection dropdown) in the user's preferences."""
+        try:
+            self.preferences.set_display(**{key: identifier})
+        except Exception as error:
+            self.show_error(str(error))
+
     def change_path_notation(self, *_):
         notation = self.path_notation.currentData()
         if hasattr(self, 'model'):
@@ -1391,16 +1436,39 @@ class Browser(QtWidgets.QWidget):
         except Exception as error:
             self.show_error(str(error))
 
+    def action_scope(self):
+        """(assets, whole view): the selected assets, or with no selection every asset the main
+        view shows, as the collection panel runs on its whole collection."""
+        selected = self.main_selected()
+        return (selected, False) if selected else (list(self.model.assets), True)
+
     def update_actions(self):
-        assets = self.main_selected()
+        assets, whole_view = self.action_scope()
+        if whole_view:
+            prompt = 'Pick action for all %d shown…' % len(assets)
+            scope = 'Nothing is selected: an action runs on every asset the main view shows (%d).' % len(assets)
+        else:
+            prompt = 'Pick action…'
+            scope = 'An action runs on the %d selected asset%s.' % (len(assets), '' if len(assets) == 1 else 's')
         self.action_picker.populate([action for action in self.registry.actions.values()
-                                     if self.registry.allowed(action, assets, self.access)])
+                                     if self.registry.allowed(action, assets, self.access)], prompt, scope)
         collection_assets = self.collections.action_assets()
         self.collections.actions.populate([action for action in self.registry.actions.values()
                                           if self.registry.allowed(action, collection_assets, self.access)])
 
     def run_action(self, identifier, collection=False):
-        assets = self.collections.action_assets() if collection else self.main_selected()
+        if collection:
+            assets = self.collections.action_assets()
+        else:
+            assets, whole_view = self.action_scope()
+            if whole_view and len(assets) > 1:
+                action = self.registry.actions.get(identifier)
+                name = action.manifest['name'] if action else identifier
+                answer = QtWidgets.QMessageBox.question(
+                    self, 'Run action', 'Nothing is selected. Run "%s" on all %d assets the main view shows?'
+                    % (name, len(assets)))
+                if answer != QtWidgets.QMessageBox.Yes:
+                    return
         try:
             result = self.registry.run(identifier, assets, self.access,
                                        {'parent': self, 'settings': self.settings,
@@ -1440,8 +1508,42 @@ class Browser(QtWidgets.QWidget):
 
     def update_admin_controls(self):
         """Admin-only controls are hidden, not just disabled, for everyone else."""
-        for widget in (self.access_button, self.config_button, self.library_tools_button):
+        for widget in (self.access_button, self.config_button, self.library_tools_menu.menuAction()):
             widget.setVisible(self.access.is_admin)
+        # Logged in as someone else, only Log out differs from what that user sees.
+        self.login_as_action.setVisible(self.access.is_admin and not self.access.acting_as)
+        self.logout_action.setVisible(self.access.acting_as)
+        if self.access.acting_as:
+            self.logout_action.setText('Log out (back to %s)' % login_name(self.access.real_identity))
+
+    def login_as(self):
+        """Admin: pick a user; the whole app then behaves as it does for them, until Log out."""
+        if self.edit_mode or (getattr(self, 'loader', None) is not None and self.loader.isRunning()):
+            self.show_error('Finish editing and wait for the libraries to load before logging in as another user.')
+            return
+        if not self.require_admin():
+            return
+        me = self.access.real_identity.casefold()
+        users = [user for user in self.access.users() if user.casefold() != me]
+        if not users:
+            self.show_error('There are no other users in the security file.')
+            return
+        user, accepted = QtWidgets.QInputDialog.getItem(self, 'Login as', 'Use TinyLib as:', users, 0, False)
+        if not accepted:
+            return
+        try:
+            self.access.login_as(user)
+        except (PermissionError, ValueError) as error:
+            self.show_error(str(error))
+        self.reload(False)
+
+    def logout(self):
+        """Stop being someone else: back to the real account."""
+        if self.edit_mode or (getattr(self, 'loader', None) is not None and self.loader.isRunning()):
+            self.show_error('Finish editing and wait for the libraries to load before logging out.')
+            return
+        self.access.logout()
+        self.reload(False)
 
     def manage_access(self):
         if not self.require_admin():
@@ -1617,11 +1719,11 @@ class Browser(QtWidgets.QWidget):
                 asset = items[0]['asset']
                 config = writable_library(self.settings, self.access, asset)
                 try:
-                    handle = acquire_edit_lock(config['root'], self.access.identity)
+                    handle = acquire_edit_lock(config['root'], self.access.actor)
                 except LibraryEditLocked as error:
                     if not self.access.is_admin or not self.confirm_edit_override(error.locks):
                         raise
-                    handle = acquire_edit_lock(config['root'], self.access.identity, override=True)
+                    handle = acquire_edit_lock(config['root'], self.access.actor, override=True)
                 handles.append(handle)
                 edits = []
                 for item in items:
@@ -1680,7 +1782,13 @@ class Browser(QtWidgets.QWidget):
         """Window title with the user and its groups, e.g. "TinyLib · Studio library · jan (admins, artists)"."""
         groups = ', '.join(sorted(self.access.groups))
         user = '%s (%s)' % (self.access.identity, groups) if groups else self.access.identity
+        if self.access.acting_as:
+            user += ', logged in by ' + self.access.real_identity
         self.setWindowTitle('TinyLib · Studio library · ' + user)
+        if hasattr(self, 'user_button'):
+            self.user_button.setText(login_name(self.access.identity))
+            self.user_button.setToolTip(user)
+            self.user_info.setText(user)
 
     def configuration(self):
         if self.require_admin():

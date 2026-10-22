@@ -71,6 +71,40 @@ class AccessActionTests(unittest.TestCase):
         self.assertFalse((folder / 'executed').exists())
         self.assertEqual(registry.run('test.action', [asset], self.user()), [1, 'studio\\artist', 42])
 
+    def test_a_whole_view_checks_each_library_once(self):
+        registry, _ = self.plugin()
+        self.grant()
+        user = self.user()
+        asset = {'name': 'Asset', 'main': 'C:/a/test.exr', 'library_root': self.library['root']}
+        calls = []
+        original = user.can
+        user.can = lambda root, *args: calls.append(root) or original(root, *args)
+        self.assertTrue(registry.allowed(registry.actions['test.action'], [asset] * 500, user))
+        self.assertEqual(len(calls), 2)  # view and action, once for the one library
+        self.assertFalse(registry.allowed(registry.actions['test.action'], [asset, dict(asset, library_root='unlisted')], user))
+
+    def test_admin_logs_in_as_another_user_and_back(self):
+        self.grant()
+        self.admin.login_as('STUDIO\\Artist')
+        self.assertTrue(self.admin.acting_as)
+        self.assertEqual(self.admin.identity, 'studio\\artist')
+        self.assertEqual(self.admin.groups, {'users', 'restricted'})
+        self.assertFalse(self.admin.is_admin)
+        self.assertFalse(self.admin.can(self.library['root'], 'ingest'))
+        self.assertEqual(self.admin.actor, 'studio\\first as studio\\artist')
+        self.admin.refresh()  # Stays the other user until logout.
+        self.assertEqual(self.admin.groups, {'users', 'restricted'})
+        self.admin.logout()
+        self.assertFalse(self.admin.acting_as)
+        self.assertTrue(self.admin.is_admin)
+        self.assertEqual(self.admin.actor, 'studio\\first')
+        with self.assertRaises(ValueError):
+            self.admin.login_as('studio\\nobody')
+        self.assertTrue(self.admin.is_admin and not self.admin.acting_as)
+        with self.assertRaises(PermissionError):
+            self.user().login_as('studio\\first')
+        self.assertFalse(self.user().is_admin)
+
     def test_refresh_revokes_grants_and_malformed_assignment_fails_closed(self):
         self.grant()
         user = self.user()

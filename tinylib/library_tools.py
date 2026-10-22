@@ -185,7 +185,7 @@ def sort_library(settings, access, library, override=False, progress=None):
     require_admin(access)
     config = writable_library(settings, access, {'library_root': library['root']})
     report('Acquiring library edit lock…')
-    handle = acquire_edit_lock(config['root'], access.identity, override=override)
+    handle = acquire_edit_lock(config['root'], getattr(access, 'actor', access.identity), override=override)
     try:
         with library_lock(config['root']):
             assert_edit_write_allowed(config['root'], handle['token'])
@@ -278,7 +278,7 @@ def label_library(settings, access, library, only_empty=True, rules=None, overri
     require_admin(access)
     config = writable_library(settings, access, {'library_root': library['root']})
     report('Acquiring library edit lock…')
-    handle = acquire_edit_lock(config['root'], access.identity, override=override)
+    handle = acquire_edit_lock(config['root'], getattr(access, 'actor', access.identity), override=override)
     try:
         with library_lock(config['root']):
             assert_edit_write_allowed(config['root'], handle['token'])
@@ -372,7 +372,7 @@ def clean_library_keywords(settings, access, library, asset_ids=None, remove_num
     require_admin(access)
     config = writable_library(settings, access, {'library_root': library['root']})
     report('Acquiring library edit lock…')
-    handle = acquire_edit_lock(config['root'], access.identity, override=override)
+    handle = acquire_edit_lock(config['root'], getattr(access, 'actor', access.identity), override=override)
     try:
         with library_lock(config['root']):
             assert_edit_write_allowed(config['root'], handle['token'])

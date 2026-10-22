@@ -44,8 +44,33 @@ app.processEvents()
 assert not window.assets and not window.errors, window.errors
 assert window.categories.topLevelItemCount() == 1
 assert not window.access_button.isVisible()
-assert not window.library_tools_button.isVisible()
+assert not window.library_tools_menu.menuAction().isVisible()
+assert window.user_button.text() == 'guest'
 assert not window.ingest_button.isEnabled()
 assert not window.action_picker.button.isEnabled()
+assert not window.login_as_action.isVisible() and not window.logout_action.isVisible()
+window.close()
+# An admin logged in as the guest sees what the guest sees, plus Log out.
+window = Browser(config, folder / 'preferences.json', access=AccessControl({'_config_path': str(config)}, identity='test\\admin'))
+timer.start()
+while window.loader.isRunning() and timer.elapsed() < 5000:
+    app.processEvents()
+    QtCore.QThread.msleep(5)
+assert window.login_as_action.isVisible() and not window.logout_action.isVisible()
+window.access.login_as('test\\guest')
+window.reload(False)
+while window.loader.isRunning() and timer.elapsed() < 10000:
+    app.processEvents()
+    QtCore.QThread.msleep(5)
+app.processEvents()
+assert window.user_button.text() == 'guest' and window.access.actor == 'test\\admin as test\\guest'
+assert not window.access_button.isVisible() and not window.library_tools_menu.menuAction().isVisible()
+assert not window.login_as_action.isVisible() and window.logout_action.isVisible()
+window.logout()
+while window.loader.isRunning() and timer.elapsed() < 15000:
+    app.processEvents()
+    QtCore.QThread.msleep(5)
+assert window.user_button.text() == 'admin' and window.library_tools_menu.menuAction().isVisible()
+assert window.login_as_action.isVisible() and not window.logout_action.isVisible()
 window.close()
 print('Access UI passed: administrator assignment persists; restricted user cannot load private libraries.')

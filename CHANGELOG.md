@@ -36,6 +36,11 @@
 
 ### Interface
 
+- A user menu in the bottom-left corner shows your login name without the domain (e.g. `jan` for `studio\jan`); it lists your full account and groups. For administrators it holds **Library tools**, which moved there from beneath the library tree.
+- Admins can **Login as…** another user from the user menu: TinyLib then behaves as it does for that user until **Log out** in the same menu. Edit locks, ingests and the log record both accounts (`studio\admin as studio\jan`).
+- The action dropdowns remember the last action you picked, in your user preferences (`last_action` for the properties panel, `last_collection_action` for the collection panel). It is preselected whenever it is available for what the dropdown would run on.
+- The status line shows how many assets are selected (main view or collection, whichever has focus) when any are, e.g. `120 assets / 4000 total · 0 collected · 3 selected`. The count of assets in collections reads "collected" instead of "picked".
+- The properties panel's action dropdown also works with nothing selected: actions then run on every asset the main view shows, after a confirmation, as the collection dropdown runs on the whole collection.
 - The properties panel shows a read-only **Parts** row below Type: the asset's components and file types, main first, e.g. `main:exr highres:exr proxy:jpg`. Thumbnail and filmstrip are not listed.
 - The Stars filter is the same five stars as **Rate selection**: click a star to show assets with at least that many stars, click it again or **Any** for every rating. It replaces the operator and number.
 - Fixed: the Length, Width and Stars numbers still could not be typed into. They are plain number fields now instead of spin boxes; clearing a number sets the rule back to Any.
