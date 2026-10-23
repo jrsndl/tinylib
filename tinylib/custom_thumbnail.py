@@ -10,6 +10,8 @@ import time
 import uuid
 from pathlib import Path
 
+from .storage import clear_hidden
+
 JPEG_QUALITY = 95
 
 
@@ -140,11 +142,13 @@ def save_thumbnail(frame, asset):
     written = image_info(data, str(path))
     if written[1:] != (width, height):
         raise ValueError('The new thumbnail is %dx%d, not %dx%d.' % (written[1], written[2], width, height))
-    temporary = path.with_name('.%s.%s.tinylib-tmp%s' % (path.stem, uuid.uuid4().hex[:8], path.suffix))
+    # Not a dot name: a Samba share would hide it, and the thumbnail after the rename.
+    temporary = path.with_name('%s.%s.tinylib-tmp%s' % (path.stem, uuid.uuid4().hex[:8], path.suffix))
     try:
         with open(temporary, 'wb') as stream:
             stream.write(data)
         replace_file(temporary, path)
+        clear_hidden(path)
     finally:
         if temporary.exists():
             try:

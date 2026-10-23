@@ -1,3 +1,4 @@
 def run(assets, context, config):
-    from tinylib.nuke_bridge import import_asset
-    return [import_asset(asset, highres=config.get('highres', True)) for asset in assets]
+    from tinylib.nuke_bridge import import_assets
+    # A color space missing from the Nuke project is reported, not an error.
+    return import_assets(assets, highres=config.get('highres', True))

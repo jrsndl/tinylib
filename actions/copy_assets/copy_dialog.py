@@ -78,7 +78,9 @@ class CopyDialog(QtWidgets.QDialog):
             hint = QtWidgets.QLabel('The Nuke script is not saved yet: choose the base folder.')
             hint.setObjectName('muted')
             form.addRow('', hint)
-        self.template = QtWidgets.QLineEdit(value('template', '.'))
+        # Nuke and standalone keep their own template: in Nuke it starts beside the script.
+        self.template_key = 'template_nuke' if self.nuke else 'template'
+        self.template = QtWidgets.QLineEdit(value(self.template_key, './resources' if self.nuke else '.'))
         self.template.setToolTip('Relative to the base folder; .. goes one folder up. {date} is today (YYYYMMDD), '
                                  '{collection} the collection name. Environment variables are expanded.\n'
                                  'All assets are copied into this one folder.')
@@ -120,14 +122,20 @@ class CopyDialog(QtWidgets.QDialog):
         self.frame_mode.addItem('Start at the script start frame (%d)' % start, 'start')
         self.frame_mode.addItem('Expression (empty)', 'expression')
         self.frame_mode.setCurrentIndex(max(0, self.frame_mode.findData(value('frame_mode', 'none'))))
+        self.read_colorspace = QtWidgets.QCheckBox('Set colorspace')
+        self.read_colorspace.setToolTip('Set each Read node to the asset\'s color space (main and highres). '
+                                        'Off: Nuke chooses it from the file, as for a Read you make yourself.')
+        self.read_colorspace.setChecked(bool(value('nuke_colorspace', False)))
         if self.nuke:
             form.addRow('Nuke', self.make_reads)
             form.addRow('Read frame mode', self.frame_mode)
-            self.make_reads.toggled.connect(self.frame_mode.setEnabled)
-            self.frame_mode.setEnabled(self.make_reads.isChecked())
+            form.addRow('', self.read_colorspace)
+            self.make_reads.toggled.connect(self.update_read_options)
+            self.update_read_options()
         else:
             self.make_reads.hide()
             self.frame_mode.hide()
+            self.read_colorspace.hide()
         layout.addLayout(form)
         self.progress = QtWidgets.QProgressBar()
         self.progress.hide()
@@ -147,6 +155,10 @@ class CopyDialog(QtWidgets.QDialog):
         for signal in (self.base.textChanged, self.template.textChanged):
             signal.connect(self.update_destination)
         self.update_destination()
+
+    def update_read_options(self, *_):
+        for widget in (self.frame_mode, self.read_colorspace):
+            widget.setEnabled(self.make_reads.isChecked() and self.make_reads.isEnabled())
 
     def component(self):
         return next(name for name, button in self.component_buttons.items() if button.isChecked())
@@ -175,11 +187,17 @@ class CopyDialog(QtWidgets.QDialog):
         if self.preferences is None:
             return
         try:
-            self.preferences.set_display(copy_assets={
-                'base': self.base.text().strip(), 'template': self.template.text(), 'component': self.component(),
-                'subfolders': self.subfolders.isChecked(), 'in_out': self.in_out.isChecked(),
-                'overwrite': self.overwrite.currentData(), 'nuke_reads': self.make_reads.isChecked(),
-                'frame_mode': self.frame_mode.currentData()})
+            choices = {self.template_key: self.template.text(), 'component': self.component(),
+                       'subfolders': self.subfolders.isChecked(), 'in_out': self.in_out.isChecked(),
+                       'overwrite': self.overwrite.currentData()}
+            if self.nuke:  # the base folder in Nuke is the script's; remember only a chosen one
+                choices.update(nuke_reads=self.make_reads.isChecked(), frame_mode=self.frame_mode.currentData(),
+                               nuke_colorspace=self.read_colorspace.isChecked())
+            else:
+                choices['base'] = self.base.text().strip()
+            remembered = (self.preferences.data.get('display', {}).get('copy_assets') or {})
+            # Kept beside what the other host remembered (its own template).
+            self.preferences.set_display(copy_assets=dict(remembered, **choices))
         except Exception:
             pass  # Remembering the choices is a convenience only.
 
@@ -212,8 +230,11 @@ class CopyDialog(QtWidgets.QDialog):
 
     def set_running(self, running):
         for widget in (self.base, self.template, self.subfolders, self.in_out, self.overwrite, self.make_reads,
-                       self.frame_mode, self.copy_button, self.close_button, *self.component_buttons.values()):
+                       self.frame_mode, self.read_colorspace, self.copy_button, self.close_button,
+                       *self.component_buttons.values()):
             widget.setEnabled(not running)
+        if self.nuke:
+            self.update_read_options()
         self.cancel_button.setVisible(running)
 
     def copied(self, done, total, path):
@@ -242,7 +263,8 @@ class CopyDialog(QtWidgets.QDialog):
         warnings = []
         if self.nuke and self.make_reads.isChecked():
             try:
-                nodes, warnings = reads.create_reads(self.items, self.component(), self.frame_mode.currentData())
+                nodes, warnings = reads.create_reads(self.items, self.component(), self.frame_mode.currentData(),
+                                                     self.read_colorspace.isChecked())
                 parts.append('%d Read node(s) created' % len(nodes))
             except Exception as error:
                 warnings.append('Read nodes: %s' % error)

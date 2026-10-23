@@ -1,5 +1,6 @@
 """Copy Assets in Nuke: Read nodes for the copied footage."""
 from tinylib.asset_fields import display_name
+from tinylib.nuke_bridge import set_colorspace
 
 FRAME_MODES = ('none', 'start', 'expression')
 
@@ -24,12 +25,12 @@ def colorspace_for(asset, component):
     return asset.get('colorspace', '') if component in ('main', 'highres') else ''
 
 
-def create_reads(items, component, frame_mode='none'):
-    """One Read node per copied asset. Returns (nodes, warnings)."""
+def create_reads(items, component, frame_mode='none', colorspace=False):
+    """One Read node per copied asset. Returns (nodes, warnings). With ``colorspace`` the
+    asset's color space is set (main and highres); otherwise Nuke chooses it."""
     import nuke
     nodes, warnings = [], []
     start = script_frames()[0]
-    aliases = {'ACEScg': ['ACEScg', 'ACES - ACEScg'], 'ACES - ACEScg': ['ACES - ACEScg', 'ACEScg']}
     for item in items:
         read = item.get('read')
         if not read:
@@ -41,15 +42,10 @@ def create_reads(items, component, frame_mode='none'):
             for knob, value in (('first', read['first']), ('origfirst', read['first']),
                                 ('last', read['last']), ('origlast', read['last'])):
                 node[knob].setValue(int(value))
-        space = colorspace_for(asset, component)
-        if space:
-            options = node['colorspace'].values()
-            chosen = next((name for name in aliases.get(space, [space]) if name in options), None)
-            if chosen:
-                node['colorspace'].setValue(chosen)
-            else:
-                warnings.append('%s: color space %r is not in this Nuke project; the Read node uses Nuke\'s default.'
-                                % (display_name(asset), space))
+        if colorspace:
+            warning = set_colorspace(node, colorspace_for(asset, component), display_name(asset))
+            if warning:
+                warnings.append(warning)
         if frame_mode == 'start':
             node['frame_mode'].setValue('start at')
             node['frame'].setValue(str(start))

@@ -38,6 +38,28 @@ def _replace(source, target, attempts=20, delay=.1):
             time.sleep(delay)
 
 
+FILE_ATTRIBUTE_HIDDEN = 0x2
+
+
+def clear_hidden(path):
+    """Remove the Windows hidden attribute from ``path``, if it has it; elsewhere nothing.
+
+    A Samba share with ``hide dot files`` (its default) marks a file whose name starts with a
+    dot as hidden, and the mark stays when the file is renamed. Temporary names therefore never
+    start with a dot, and files written through one are checked here as well."""
+    if os.name != 'nt':
+        return False
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        attributes = kernel32.GetFileAttributesW(str(path))
+        if attributes == 0xFFFFFFFF or not attributes & FILE_ATTRIBUTE_HIDDEN:
+            return False
+        return bool(kernel32.SetFileAttributesW(str(path), attributes & ~FILE_ATTRIBUTE_HIDDEN))
+    except Exception:  # never fail a write over an attribute
+        return False
+
+
 def atomic_json(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

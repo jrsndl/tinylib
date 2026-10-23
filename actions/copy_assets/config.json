@@ -1,9 +1,11 @@
 {
   "template": ".",
+  "template_nuke": "./resources",
   "component": "main",
   "subfolders": true,
   "in_out": false,
   "overwrite": false,
   "nuke_reads": true,
-  "frame_mode": "none"
+  "frame_mode": "none",
+  "nuke_colorspace": false
 }

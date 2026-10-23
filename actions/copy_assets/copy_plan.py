@@ -13,8 +13,10 @@ import uuid
 from pathlib import Path
 
 from tinylib.asset_fields import display_name
+from tinylib.custom_thumbnail import replace_file
 from tinylib.ingest import clean_file_name
 from tinylib.library import frame_path, split_sequence
+from tinylib.storage import clear_hidden
 from tinylib.trim import clean_trim
 
 COMPONENTS = ('main', 'highres', 'proxy')
@@ -111,12 +113,16 @@ def total_files(items):
 
 
 def copy_file(source, destination):
-    """Copy to a temporary name beside ``destination``, then rename it into place."""
+    """Copy to a temporary name beside ``destination``, then rename it into place.
+
+    The temporary name never starts with a dot: Samba shares hide such files, and the file
+    would stay hidden after the rename."""
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name('.%s.%s.tinylib-copy' % (destination.name, uuid.uuid4().hex[:8]))
+    temporary = destination.with_name('%s.%s.tinylib-copy' % (destination.name, uuid.uuid4().hex[:8]))
     try:
         shutil.copy2(str(source), str(temporary))
-        os.replace(str(temporary), str(destination))
+        replace_file(temporary, destination)  # retried while the share still holds the new file
+        clear_hidden(destination)
     finally:
         if temporary.exists():
             try:

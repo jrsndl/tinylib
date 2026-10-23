@@ -162,10 +162,24 @@ class CopyTests(Base):
         cancelled = plan_module.run(items, overwrite=True, cancelled=lambda: calls.append(1) or len(calls) > 2)
         self.assertEqual(cancelled, {'copied': 2, 'existing': 0, 'cancelled': True})
 
+    def test_temporary_names_never_start_with_a_dot(self):
+        # Samba hides dot files, and the hidden mark survives the rename.
+        source = Path(self.single('a.exr', b'data'))
+        seen = []
+        real = plan_module.replace_file
+
+        def spy(temporary, target):
+            seen.append(Path(temporary).name)
+            return real(temporary, target)
+        with patch.object(plan_module, 'replace_file', side_effect=spy):
+            plan_module.copy_file(source, self.out / 'a.exr')
+        self.assertFalse(seen[0].startswith('.'))
+        self.assertEqual((self.out / 'a.exr').read_bytes(), b'data')
+
     def test_a_failed_copy_leaves_no_partial_file(self):
         source = Path(self.single('a.exr', b'data'))
         target = self.out / 'a.exr'
-        with patch.object(plan_module.os, 'replace', side_effect=OSError('disk full')):
+        with patch.object(plan_module, 'replace_file', side_effect=OSError('disk full')):
             with self.assertRaises(OSError):
                 plan_module.copy_file(source, target)
         self.assertEqual(list(self.out.iterdir()), [])
@@ -228,7 +242,7 @@ class NukeReadTests(Base):
         items, _ = plan_module.plan(assets, 'main', self.out)
         with patch.dict(sys.modules, {'nuke': self.fake_nuke()}):
             self.assertEqual(reads.script_folder(), 'D:/shots/sh010/comp')
-            nodes, warnings = reads.create_reads(items, 'main', 'start')
+            nodes, warnings = reads.create_reads(items, 'main', 'start', colorspace=True)
             self.assertEqual(nodes[0]['file'].value(), str(self.out / 'fire' / 'fire.####.exr').replace('\\', '/'))
             self.assertEqual((nodes[0]['first'].value(), nodes[0]['last'].value()), (1001, 1005))
             self.assertEqual(nodes[0]['colorspace'].value(), 'ACES - ACEScg')
@@ -236,10 +250,12 @@ class NukeReadTests(Base):
             self.assertIsNone(nodes[1]['first'].value())
             self.assertEqual(nodes[1]['colorspace'].value(), 'default')
             self.assertIn('Linear Rec.709', warnings[0])
-            nodes, _ = reads.create_reads(items, 'proxy', 'expression')
+            nodes, _ = reads.create_reads(items, 'proxy', 'expression', colorspace=True)
             self.assertEqual((nodes[0]['frame_mode'].value(), nodes[0]['frame'].value()), ('expression', ''))
             self.assertEqual(nodes[0]['colorspace'].value(), 'default')
-            nodes, _ = reads.create_reads(items, 'main')
+            nodes, warnings = reads.create_reads(items, 'main')
+            # "Set colorspace" off (the default): Nuke's own choice, no warnings.
+            self.assertEqual((nodes[0]['colorspace'].value(), warnings), ('default', []))
             self.assertIsNone(nodes[0]['frame_mode'].value())
 
 
