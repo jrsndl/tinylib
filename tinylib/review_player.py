@@ -261,8 +261,10 @@ class ReviewPlayer(QtWidgets.QWidget):
     rating_requested = QtCore.Signal(int)
     trim_requested = QtCore.Signal(object)  # (in, out) in asset frame numbers, or None for the whole range.
     navigate_requested = QtCore.Signal(int)  # PgUp -1 / PgDn +1: the previous or next asset
+    thumbnail_requested = QtCore.Signal(object)  # QImage: the stopped frame at full proxy resolution
+    context_menu_requested = QtCore.Signal(object)  # global QPoint: right-click, for the actions menu
 
-    def __init__(self, settings, asset, stream, parent=None):
+    def __init__(self, settings, asset, stream, parent=None, can_set_thumbnail=False, can_copy=True):
         super().__init__(parent, QtCore.Qt.Window)
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose)
         self.setWindowTitle('TinyLib — ' + display_name(asset))
@@ -278,7 +280,7 @@ class ReviewPlayer(QtWidgets.QWidget):
             'I / O: set the in / out point',
             'Alt+X: clear in and out',
             'F: frame-number overlay',
-            'Ctrl+C: copy the stopped frame at full resolution',
+            'Ctrl+C: copy the stopped frame at full resolution' if can_copy else 'Copying frames is not allowed for you',
             '0–5: rating',
             'PgUp / PgDn: previous / next asset',
             'Hover at the bottom: timeline and Loop',
@@ -306,6 +308,7 @@ class ReviewPlayer(QtWidgets.QWidget):
         self.scrubbing = False
         self.copy_decoder = None
         self.copy_target = None
+        self.frame_use = 'copy'  # what the full-resolution frame is fetched for: 'copy' or 'thumbnail'
         self.copy_settings, self.copy_stream = settings, dict(stream)
         self.decoder = FrameDecoder(settings, asset.get('proxy') or asset.get('thumb'), stream, self.fps, self.count, self)
         self.decoder.available.connect(self.frame_ready)
@@ -329,6 +332,19 @@ class ReviewPlayer(QtWidgets.QWidget):
                                       'QCheckBox::indicator { width: 13px; height: 13px; border: 1px solid #888; background: #222; } '
                                       'QCheckBox::indicator:checked { background: #d8ab70; border: 1px solid #e5c59c; }')
         self.loop_toggle.toggled.connect(lambda enabled: setattr(self, 'loop', enabled))
+        # Footage, for administrators and users with the library's edit or ingest permission.
+        self.thumbnail_button = QtWidgets.QPushButton('Set as thumbnail')
+        self.thumbnail_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.thumbnail_button.setToolTip('Replace the asset\'s thumbnail with this frame (player stopped).\n'
+                                         'The new file has the size and file type of the old one.')
+        self.thumbnail_button.setStyleSheet('QPushButton { color: #ddd; background: #3a3a3a; border: 1px solid #666; '
+                                            'padding: 2px 10px; } QPushButton:disabled { color: #777; border-color: #444; }')
+        self.thumbnail_button.clicked.connect(lambda _=False: self.request_thumbnail())
+        self.can_set_thumbnail = bool(can_set_thumbnail) and self.footage
+        self.can_copy = bool(can_copy)  # the library's copy permission (Ctrl+C)
+        self.thumbnail_button.setVisible(self.can_set_thumbnail)
+        heading.addWidget(self.thumbnail_button)
+        heading.addSpacing(12)
         heading.addWidget(self.loop_toggle)
         layout.addLayout(heading)
         self.timeline = Timeline(self.bar)
@@ -369,6 +385,7 @@ class ReviewPlayer(QtWidgets.QWidget):
         trim = '     In %d · Out %d' % (self.first + self.in_point, self.first + self.out_point) if self.trimmed() else ''
         self.time_label.setText('%s / %s     %s%s' % (stamp(self.current), stamp(self.count - 1), state, trim))
         self.timeline.trim = (self.in_point, self.out_point) if self.trimmed() else None
+        self.thumbnail_button.setEnabled(self.frame_ready_to_use())
         if not self.scrubbing:
             self.timeline.blockSignals(True)
             self.timeline.setValue(self.current)
@@ -514,9 +531,25 @@ class ReviewPlayer(QtWidgets.QWidget):
         self.stop_playback()
         self.error.emit(message)
 
-    def copy_current_frame(self):
-        if self.direction or self.pending or self.scrubbing or self.failure or self.picture.isNull():
+    def frame_ready_to_use(self):
+        """A stopped, fully shown frame: what Ctrl+C and Set as thumbnail use."""
+        return not (self.direction or self.pending or self.scrubbing or self.failure or self.picture.isNull())
+
+    def request_thumbnail(self):
+        if not self.can_set_thumbnail or not self.frame_ready_to_use():
             return
+        self.copy_current_frame('thumbnail')
+
+    def show_feedback(self, message):
+        """A short message in the top-right corner, as for ratings."""
+        self.rating_feedback = message
+        self.rating_timer.start()
+        self.update()
+
+    def copy_current_frame(self, use='copy'):
+        if not self.frame_ready_to_use():
+            return
+        self.frame_use = use
         self.copy_target = self.current
         if (self.picture.width(), self.picture.height()) == (int(self.copy_stream['width']), int(self.copy_stream['height'])):
             self.copy_image(self.picture)
@@ -537,18 +570,29 @@ class ReviewPlayer(QtWidgets.QWidget):
             self.copy_image(self.copy_decoder.image(frame))
 
     def copy_image(self, image):
+        if self.frame_use == 'thumbnail':
+            self.frame_use = 'copy'
+            self.thumbnail_requested.emit(image.copy())
+            return
         QtWidgets.QApplication.clipboard().setImage(image.copy())
-        self.rating_feedback = 'Frame copied'
-        self.rating_timer.start()
-        self.update()
+        self.show_feedback('Frame copied')
 
     def copy_error(self, message):
-        self.error.emit('Could not copy proxy frame: ' + message)
+        self.error.emit('Could not read the full proxy frame: ' + message)
+
+    def contextMenuEvent(self, event):
+        self.context_menu_requested.emit(event.globalPos())
+        event.accept()
 
     def keyPressEvent(self, event):
         if event.matches(QtGui.QKeySequence.Copy):
             if not event.isAutoRepeat():
-                self.copy_current_frame()
+                if self.can_copy:
+                    self.copy_current_frame()
+                else:
+                    self.rating_feedback = 'Copying is not allowed'
+                    self.rating_timer.start()
+                    self.update()
             event.accept()
             return
         key = event.key()

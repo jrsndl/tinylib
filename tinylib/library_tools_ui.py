@@ -767,3 +767,94 @@ class KeywordsDialog(QtWidgets.QDialog):
             event.ignore()
         else:
             super().closeEvent(event)
+
+
+class CategoryChangeDialog(QtWidgets.QDialog):
+    """Category change: where the selected assets of one library move to. Only asks; the
+    browser moves them (in edit mode, with its library edit lock)."""
+
+    def __init__(self, library, assets, categories, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Category change')
+        self.setMinimumWidth(560)
+        self.assets = assets
+        layout = QtWidgets.QVBoxLayout(self)
+        current = sorted({asset.get('category', '') for asset in assets})
+        intro = QtWidgets.QLabel('<b>%d asset(s)</b> in <b>%s</b>, now in: %s'
+                                 % (len(assets), library['name'], ', '.join(current)))
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        form = QtWidgets.QFormLayout()
+        self.existing = QtWidgets.QRadioButton('Existing category')
+        self.category = QtWidgets.QComboBox()
+        self.category.addItems(categories)
+        self.new = QtWidgets.QRadioButton('New category')
+        self.name = QtWidgets.QLineEdit()
+        self.name.setPlaceholderText('Folder name of the new category')
+        form.addRow(self.existing, self.category)
+        form.addRow(self.new, self.name)
+        layout.addLayout(form)
+        (self.existing if categories else self.new).setChecked(True)
+        self.existing.setEnabled(bool(categories))
+        self.destination = QtWidgets.QLabel()
+        self.destination.setWordWrap(True)
+        layout.addWidget(self.destination)
+        note = QtWidgets.QLabel(
+            'Each asset folder is moved on disk to <i>&lt;library&gt;/&lt;category&gt;/&lt;asset name&gt;</i> and its '
+            'record is updated. Nothing is copied or deleted. If a folder cannot be moved (for example a file '
+            'in it is open), nothing is changed. Your own ratings, in/out points and collection entries follow '
+            'the moved assets.')
+        note.setWordWrap(True)
+        note.setObjectName('muted')
+        layout.addWidget(note)
+        warning = QtWidgets.QLabel(
+            '⚠ <b>Other users lose their ratings, in/out points and collection entries for these assets.</b> '
+            'They are stored with the old path: their collections show the moved assets as unavailable.')
+        warning.setWordWrap(True)
+        warning.setStyleSheet('color: #ffa02f;')
+        layout.addWidget(warning)
+        self.message = QtWidgets.QLabel()
+        self.message.setStyleSheet('color: #ff6060;')
+        self.message.setWordWrap(True)
+        layout.addWidget(self.message)
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Cancel)
+        self.move_button = buttons.addButton('Move assets', QtWidgets.QDialogButtonBox.AcceptRole)
+        self.move_button.clicked.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        for signal in (self.existing.toggled, self.category.currentTextChanged, self.name.textChanged):
+            signal.connect(self.update_destination)
+        self.name.textEdited.connect(lambda _: self.new.setChecked(True))
+        self.update_destination()
+
+    def chosen(self):
+        return (self.category.currentText() if self.existing.isChecked() else self.name.text()).strip()
+
+    def problem(self):
+        from .library import safe_component
+        category = self.chosen()
+        if not category:
+            return 'Choose or enter a category.'
+        try:
+            safe_component(category)
+        except ValueError:
+            return 'A category is one folder name: no \\ / : * ? " < > | and no trailing dot or space.'
+        if category.startswith('.'):
+            return 'A category name cannot start with a dot.'
+        if all(asset.get('category') == category for asset in self.assets):
+            return 'The assets are already in %s.' % category
+        return ''
+
+    def update_destination(self, *_):
+        self.category.setEnabled(self.existing.isChecked())
+        problem = self.problem()
+        self.message.setText(problem)
+        self.move_button.setEnabled(not problem)
+        staying = sum(asset.get('category') == self.chosen() for asset in self.assets)
+        self.destination.setText('' if problem else 'Moves %d asset(s) to <b>%s</b>%s.' % (
+            len(self.assets) - staying, self.chosen(),
+            ' (%d already there stay)' % staying if staying else ''))
+
+    def accept(self):
+        if not self.problem():
+            super().accept()

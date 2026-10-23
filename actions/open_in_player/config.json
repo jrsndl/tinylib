@@ -1,0 +1,34 @@
+{
+  "not_players": [
+    "ffmpeg",
+    "ffprobe",
+    "ffplay",
+    "vfx_transcode",
+    "vfx-transcode",
+    "oiiotool",
+    "ocio",
+    "ayon_console"
+  ],
+  "presets": {
+    "rv": {
+      "arguments": "{rv}"
+    },
+    "djv": {
+      "arguments": "{first_file}",
+      "in_out_arguments": "-timeUnits Frames -inPoint {first} -outPoint {last}"
+    },
+    "mrv2": {
+      "arguments": "{first_file}",
+      "in_out_arguments": "-inOutRange {first}/{count}/{fps}"
+    },
+    "xstudio": {
+      "arguments": "{xstudio}"
+    }
+  },
+  "default_arguments": "{first_file}",
+  "defaults": {
+    "component": "main",
+    "in_out": true,
+    "one_process": true
+  }
+}

@@ -52,6 +52,39 @@ class AccessActionTests(unittest.TestCase):
         self.assertFalse(user.can('unlisted', 'view'))
         self.assertEqual(json.loads(self.path.read_text())['tools'], {'ffplay': 'ffplay'})
 
+    def test_copy_permission_view_without_copy(self):
+        from tinylib.access import copy_denied_libraries
+        libraries = copy.deepcopy(self.admin.data['libraries'])
+        libraries[0]['permissions'] = {'view': ['users', 'restricted'], 'actions': ['users', 'restricted']}
+        self.admin.save({'studio\\first': DEFAULT_GROUPS, 'studio\\viewer': ['restricted'],
+                         'studio\\artist': ['users', 'restricted']}, DEFAULT_GROUPS, libraries)
+        asset = {'library_root': self.library['root'], 'library': 'Library', 'main': 'a.exr'}
+        viewer, artist = self.user('studio\\viewer'), self.user()
+        self.assertTrue(viewer.can(self.library['root'], 'view'))
+        self.assertFalse(viewer.can(self.library['root'], 'copy'))  # the default copy grant excludes restricted
+        self.assertFalse(viewer.can_copy([asset]))
+        self.assertEqual(copy_denied_libraries([asset], viewer), 'Library')
+        self.assertTrue(artist.can_copy([asset]))  # grants add up: users still copies
+        self.assertTrue(self.admin.can_copy([asset]))
+        self.assertFalse(artist.can_copy([asset, dict(asset, library_root='unlisted')]))
+        folder = self.root / 'actions/copy'
+        folder.mkdir(parents=True)
+        atomic_json(folder / 'manifest.json', {'id': 'copy.test', 'name': 'Copy', 'version': '1', 'category': 'Test',
+                                             'permissions': ['copy']})
+        atomic_json(folder / 'config.json', {})
+        (folder / 'action.py').write_text('def run(assets, context, config):\n    return "ran"\n')
+        registry = ActionRegistry([folder.parent])
+        action = registry.actions['copy.test']
+        self.assertEqual(action.permissions, ['copy'])
+        self.assertFalse(registry.allowed(action, [asset], viewer))
+        self.assertTrue(registry.allowed(action, [asset], artist))
+        with self.assertRaises(PermissionError):
+            registry.run('copy.test', [asset], viewer)
+        self.assertEqual(registry.run('copy.test', [asset], artist), 'ran')
+        atomic_json(folder / 'manifest.json', {'id': 'copy.test', 'name': 'Copy', 'version': '1', 'category': 'Test',
+                                             'permissions': ['steal']})
+        self.assertIn('permissions must be', ' '.join(ActionRegistry([folder.parent]).errors))
+
     def test_only_admin_can_assign_and_last_admin_remains(self):
         with self.assertRaises(PermissionError):
             self.user().save({}, DEFAULT_GROUPS, [])

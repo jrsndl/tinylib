@@ -134,6 +134,26 @@ class Preferences:
     def picked_keys(self):
         return {key for c in self.collections for key in c['assets']}
 
+    def move_assets(self, moves):
+        """Assets moved to another path (Category change): their ratings, in/out points and
+        collection entries follow them. ``moves`` is ``[(old asset, new asset)]``."""
+        def move(data):
+            for old, new in moves:
+                old_key, new_key = asset_key(old), asset_key(new)
+                if old_key == new_key:
+                    continue
+                for section in ('ratings', 'trims'):
+                    values = data.setdefault(section, {})
+                    if old_key in values:
+                        values[new_key] = values.pop(old_key)
+                for collection in data['collections']:
+                    entry = collection['assets'].pop(old_key, None)
+                    if entry is not None:
+                        moved = reference(new)
+                        moved.update({k: entry[k] for k in ('in', 'out') if k in entry})
+                        collection['assets'][new_key] = moved
+        self.change(move)
+
     def rating(self, asset):
         return self.data['ratings'].get(asset_key(asset), max(0, min(5, int(asset.get('stars', 0) or 0))))
 

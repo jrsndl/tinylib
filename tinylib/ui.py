@@ -12,10 +12,11 @@ from .filters import accepts
 from .collection_ui import CollectionsPanel
 from .views import (stylesheet, Loader, ImageCache, AssetModel, Grid, DetailsView,
                     heading_font, interface_font)
-from .access import AccessControl, root_key
+from .access import AccessControl, copy_denied_libraries, root_key
+from .external_tools import available as tool_available
 from .access_ui import AccessDialog
 from .actions import ActionRegistry
-from .action_ui import ActionPicker
+from .action_ui import SETTINGS_PREFIX, ActionPicker, action_icon
 from .player import Player
 from .tile_text import TOKENS, validate_template
 from .properties_ui import PropertiesEditor
@@ -27,11 +28,13 @@ from .path_format import format_assets
 from .preferences_ui import PreferencesDialog
 from .asset_types import ASSET_TYPES
 from .asset_fields import display_name
+from .custom_thumbnail import can_set_thumbnail, save_thumbnail
 from .library import Library
 from .thumbnail_cache import prune_cache
-from .log import configure as configure_logging, log_path
+from .log import configure as configure_logging, get_logger, log_path
 from .library_tools import require_admin
-from .library_tools_ui import CrosscheckDialog, MetadataRescanDialog, LibrarySortDialog, CreateLibraryDialog, LabelsDialog, KeywordsDialog
+from .library_tools_ui import (CrosscheckDialog, MetadataRescanDialog, LibrarySortDialog, CreateLibraryDialog,
+                               LabelsDialog, KeywordsDialog, CategoryChangeDialog)
 
 
 class StarButton(QtWidgets.QPushButton):
@@ -229,6 +232,8 @@ def panel_widget(widget=None):
 
 
 
+log = get_logger(__name__)
+
 def login_name(identity):
     """The login name without the domain or computer: "studio\\jan" and "jan@studio.local" are "jan"."""
     return identity.replace('/', '\\').rsplit('\\', 1)[-1].split('@', 1)[0] or identity
@@ -242,11 +247,16 @@ class Browser(QtWidgets.QWidget):
         self.access = access or AccessControl(self.settings)
         self.settings['_access'] = self.access
         self.registry = ActionRegistry(self.settings['action_roots'])
+        self.registry.tool_available = lambda name: tool_available(self.settings, name)
         self.player = Player(self.settings, self)
         self.player.error.connect(self.show_error)
         self.player.rating_requested.connect(self.rate_asset)
         self.player.trim_requested.connect(self.trim_asset)
         self.player.navigate_requested.connect(self.play_adjacent)
+        self.player.thumbnail_allowed = lambda asset: can_set_thumbnail(self.access, asset, self.settings)[0]
+        self.player.thumbnail_requested.connect(self.set_picked_thumbnail)
+        self.player.copy_allowed = lambda asset: self.access.can_copy([asset])
+        self.player.context_menu_requested.connect(self.player_context_menu)
         self.preferences = Preferences(preferences_path)
         self.assets, self.errors = [], []
         self.edit_mode = False
@@ -358,9 +368,15 @@ class Browser(QtWidgets.QWidget):
         labels_action.triggered.connect(self.labels_from_names)
         keywords_action = tools_menu.addAction('Keyword cleaner…')
         keywords_action.triggered.connect(self.keyword_cleaner)
+        self.category_action = tools_menu.addAction('Category change…')
+        self.category_action.setToolTip('Move the selected assets of one library to another category; '
+                                        'also in edit mode.')
+        self.category_action.triggered.connect(self.change_category)
         create_action = tools_menu.addAction('Create new library…')
         create_action.triggered.connect(self.create_new_library)
         tools_menu.menuAction().setVisible(self.access.is_admin)
+        # Category change also works in edit mode; the other tools need edit mode off.
+        self.edit_free_tools = [action for action in tools_menu.actions() if action is not self.category_action]
         self.user_button.setMenu(user_menu)
         self.splitter.addWidget(library_panel)
         main = panel_widget()
@@ -376,6 +392,7 @@ class Browser(QtWidgets.QWidget):
         self.model = AssetModel(self)
         self.model.path_notation = display_value(display, 'path_notation')
         self.model.trim_for = self.preferences.trim  # The user's own in/out points.
+        self.model.copy_allowed = self.access.can_copy  # the library copy permission
         self.grid.setModel(self.model)
         self.table = DetailsView(self.grid.cards)
         self.table.setFrameShape(QtWidgets.QFrame.NoFrame)
@@ -448,6 +465,10 @@ class Browser(QtWidgets.QWidget):
         self.detail_image.installEventFilter(self)
         self.grid.doubleClicked.connect(self.preview)
         self.table.doubleClicked.connect(self.preview)
+        for place, views in (('main', (self.grid, self.table)), ('collection', (self.collections.grid, self.collections.table))):
+            for view in views:
+                view.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+                view.customContextMenuRequested.connect(lambda pos, v=view, p=place: self.view_context_menu(p, v, pos))
         self.cache.changed.connect(self.update_detail_image)
         self.cache.changed.connect(self.table.viewport().update)
         self.animation = QtCore.QTimer(self)
@@ -605,7 +626,9 @@ class Browser(QtWidgets.QWidget):
             widget.reset()
         self.filter()
 
-    def reload(self, use_index_cache=True):
+    def reload(self, use_index_cache=True, libraries=None):
+        """Read the libraries again in the background. ``libraries`` (configs or roots): read only
+        those and keep the other libraries' assets as loaded (after a tool changed one library)."""
         if hasattr(self, 'loader') and self.loader.isRunning():
             return
         self.refresh.setEnabled(False)
@@ -619,21 +642,40 @@ class Browser(QtWidgets.QWidget):
         except Exception as error:
             configs = []
             self.status.setText('Cannot read studio permissions: ' + str(error))
+        visible = configs  # every library the user may view (the ingest button checks them all)
+        only = None
+        if libraries is not None:
+            only = {root_key(item['root'] if isinstance(item, dict) else item) for item in libraries}
+            configs = [library for library in configs if root_key(library['root']) in only]
         if self.access.error:
             self.status.setText(self.access.error)
         # Open review players stay open; they hold their own copy of the asset.
         self.registry.reload()
-        self.ingest_button.setEnabled(any(not (library.get('read_only') or self.access.read_only(library['root'])) and self.access.can(library['root'], 'ingest') for library in configs))
+        self.ingest_button.setEnabled(any(not (library.get('read_only') or self.access.read_only(library['root'])) and self.access.can(library['root'], 'ingest') for library in visible))
         self.update_window_title()
         self.update_admin_controls()
         if getattr(self, 'loader', None) is not None:
             self.loader.deleteLater()  # Finished (checked above); don't keep one per Refresh.
         self.loader = Loader(configs, self, use_index_cache=use_index_cache)
         self.loader.progress.connect(self.library_progress)
-        self.loader.loaded.connect(self.loaded)
+        if only is None:
+            self.loader.loaded.connect(self.loaded)
+        else:
+            names = [library['name'] for library in configs]
+            self.loader.loaded.connect(lambda assets, errors: self.merge_loaded(only, names, assets, errors))
         self.loader.finished.connect(self.loading_timer.stop)
         self.loader.finished.connect(lambda: self.refresh.setEnabled(True))
         self.loader.start()
+
+    def merge_loaded(self, roots, names, assets, errors):
+        """A partial reload finished: the reloaded libraries' assets replace theirs, the other
+        libraries' stay as loaded, in the configuration's library order."""
+        kept = [asset for asset in self.assets if root_key(asset['library_root']) not in roots]
+        order = {root_key(library['root']): index for index, library in enumerate(self.settings['libraries'])}
+        merged = sorted(kept + list(assets), key=lambda asset: order.get(root_key(asset['library_root']), len(order)))
+        previous = [error for error in getattr(self, '_load_errors', [])
+                    if not any(error.startswith(name + ': ') for name in names)]
+        self.loaded(merged, previous + list(errors))
 
     def library_progress(self, progress):
         self._library_progress = progress
@@ -947,7 +989,7 @@ class Browser(QtWidgets.QWidget):
         for widget in (self.refresh, self.ingest_button, self.categories, self.search,
                        self.tag_picker, self.kind,
                        self.length_filter, self.width_filter, self.stars_filter,
-                       self.library_tools_menu.menuAction(), self.login_as_action, self.logout_action):
+                       self.login_as_action, self.logout_action, *self.edit_free_tools):
             widget.setEnabled(not editing)
         if not editing:
             self.ingest_button.setEnabled(any(
@@ -1365,6 +1407,10 @@ class Browser(QtWidgets.QWidget):
         assets = self.selected_assets()
         if not assets:
             return
+        self.access.refresh()
+        if not self.access.can_copy(assets):
+            self.show_error('You are not allowed to copy asset paths from %s.' % copy_denied_libraries(assets, self.access))
+            return
         QtWidgets.QApplication.clipboard().setText(format_assets(assets, self.model.path_notation,
                                                                  self.trim_source(self.selection_source == 'collection')))
         self.status.setText('Copied %d asset path%s.' % (len(assets), '' if len(assets) == 1 else 's'))
@@ -1454,6 +1500,26 @@ class Browser(QtWidgets.QWidget):
         trim = self.preferences.trim(asset, collection)
         self.player.play(dict(asset, _trim=trim, _trim_collection=collection, _play_source=source), replace)
 
+    def set_picked_thumbnail(self, asset, image, window):
+        """Set as thumbnail in a player: the stopped frame replaces the asset's thumbnail file."""
+        try:
+            self.access.refresh()  # Rights are checked again now, not only when the player opened.
+            allowed, reason = can_set_thumbnail(self.access, asset, self.settings)
+            if not allowed:
+                raise PermissionError(reason)
+            path = save_thumbnail(image, asset)
+        except Exception as error:
+            self.show_error('The thumbnail was not changed: %s' % error)
+            return
+        log.info('%s set the thumbnail of %s from a player frame: %s',
+                 getattr(self.access, 'actor', self.access.identity), asset.get('id', asset.get('name')), path)
+        self.cache.forget(str(asset['thumb']))
+        self.grid.viewport().update()
+        self.table.viewport().update()
+        self.status.setText('Thumbnail of %s replaced.' % display_name(asset))
+        if window is not None:
+            window.show_feedback('Thumbnail saved')
+
     def play_list(self, source):
         """The assets PgUp/PgDn step through: the current collection, or what the main view shows
         (filtered and sorted as it is now)."""
@@ -1486,33 +1552,117 @@ class Browser(QtWidgets.QWidget):
         else:
             prompt = 'Pick action…'
             scope = 'An action runs on the %d selected asset%s.' % (len(assets), '' if len(assets) == 1 else 's')
+        configurable = self.configurable_actions()
         self.action_picker.populate([action for action in self.registry.actions.values()
-                                     if self.registry.allowed(action, assets, self.access)], prompt, scope)
+                                     if (action.whole_view or not whole_view)
+                                     and self.registry.allowed(action, assets, self.access)], prompt, scope, configurable)
         collection_assets = self.collections.action_assets()
         self.collections.actions.populate([action for action in self.registry.actions.values()
-                                          if self.registry.allowed(action, collection_assets, self.access)])
+                                          if self.registry.allowed(action, collection_assets, self.access)],
+                                          configurable=configurable)
+
+    def configurable_actions(self):
+        """Actions whose settings window the user may open now, whatever is selected."""
+        return [action for action in self.registry.actions.values() if self.registry.configurable(action, self.access)]
+
+    def open_action_settings(self, identifier, context=None):
+        try:
+            result = self.registry.run(identifier, [], self.access,
+                                       dict(context or {}, parent=self, settings=self.settings), settings=True)
+            if isinstance(result, str):
+                self.status.setText(result)
+        except Exception as error:
+            self.show_error(str(error))
 
     def run_action(self, identifier, collection=False):
+        if identifier.startswith(SETTINGS_PREFIX):
+            self.open_action_settings(identifier[len(SETTINGS_PREFIX):], {'place': 'collection' if collection else 'main'})
+            return
+        action = self.registry.actions.get(identifier)
+        name = action.manifest['name'] if action else identifier
+        whole_view, context = False, {}
         if collection:
             assets = self.collections.action_assets()
+            context['collection_selected'] = self.collections.selected_assets()
         else:
             assets, whole_view = self.action_scope()
+            if whole_view and action is not None and not action.whole_view:
+                self.show_error('"%s" runs on selected assets only: select the assets first.' % name)
+                return
             if whole_view and len(assets) > 1:
-                action = self.registry.actions.get(identifier)
-                name = action.manifest['name'] if action else identifier
                 answer = QtWidgets.QMessageBox.question(
                     self, 'Run action', 'Nothing is selected. Run "%s" on all %d assets the main view shows?'
                     % (name, len(assets)))
                 if answer != QtWidgets.QMessageBox.Yes:
                     return
+        context.update({'whole_view': whole_view, 'place': 'collection' if collection else 'main',
+                        'collection': self.collections.combo.currentText() if collection else None,
+                        'trim': self.trim_source(collection)})
+        self.execute_action(identifier, assets, context)
+
+    def execute_action(self, identifier, assets, context):
+        """Run an action. ``context`` adds to what every action gets: parent, settings and
+        ``invoked`` ('dropdown' or 'context_menu')."""
         try:
-            result = self.registry.run(identifier, assets, self.access,
-                                       {'parent': self, 'settings': self.settings,
-                                        'collection': self.collections.combo.currentText() if collection else None,
-                                        'trim': self.trim_source(collection)})
+            context = dict({'invoked': 'dropdown', 'whole_view': False, 'collection': None, 'trim': None},
+                           **context, parent=self, settings=self.settings)
+            result = self.registry.run(identifier, assets, self.access, context)
             self.status.setText(str(result) if isinstance(result, str) else 'Action completed.')
         except Exception as error:
             self.show_error(str(error))
+
+    def view_context_menu(self, place, view, pos):
+        """Right-click in the main view or the collection panel: actions for the selection."""
+        index = view.indexAt(pos)
+        if not index.isValid():
+            return
+        selection = view.selectionModel()
+        if not selection.isSelected(index):
+            selection.select(index, QtCore.QItemSelectionModel.ClearAndSelect | QtCore.QItemSelectionModel.Rows)
+            selection.setCurrentIndex(index, QtCore.QItemSelectionModel.NoUpdate)
+        self.selection_source = place
+        collection = place == 'collection'
+        assets = self.collections.selected_assets() if collection else self.main_selected()
+        context = {'place': place, 'trim': self.trim_source(collection)}
+        if collection:
+            context.update({'collection': self.collections.combo.currentText(), 'collection_selected': assets})
+        self.show_action_menu(place, assets, view.viewport().mapToGlobal(pos), context, view)
+
+    def player_context_menu(self, asset, global_pos, window):
+        """Right-click in a player window: actions for the asset it shows."""
+        collection = asset.get('_trim_collection')
+        context = {'place': 'player', 'window': window,
+                   'trim': lambda item: self.preferences.trim(item, collection)}
+        self.show_action_menu('player', [asset], global_pos, context, window)
+
+    def show_action_menu(self, place, assets, global_pos, context, parent):
+        self.access.refresh()
+        actions = sorted((action for action in self.registry.actions.values()
+                          if action.in_menu(place) and assets and self.registry.allowed(action, assets, self.access)),
+                         key=lambda a: (a.manifest['category'].casefold(), a.menu_label.casefold()))
+        menu = QtWidgets.QMenu(parent)
+        category = None
+        for action in actions:
+            if category is not None and action.manifest['category'] != category:
+                menu.addSeparator()
+            category = action.manifest['category']
+            item = menu.addAction(action_icon(action.icon), action.menu_label)
+            item.setToolTip('%s / %s' % (category, action.manifest['name']))
+            # Run once the menu has closed, so a window the action opens is not nested in the menu.
+            item.triggered.connect(lambda _=False, identifier=action.id: QtCore.QTimer.singleShot(
+                0, lambda: self.execute_action(identifier, assets, dict(context, invoked='context_menu'))))
+        if not actions:
+            menu.addAction('No actions for %s' % ('this asset' if len(assets) == 1 else 'these assets')).setEnabled(False)
+        configurable = sorted((action for action in self.registry.actions.values()
+                               if action.in_menu(place) and self.registry.configurable(action, self.access)),
+                              key=lambda a: (a.manifest['category'].casefold(), a.settings_label.casefold()))
+        if configurable:
+            menu.addSeparator()
+        for action in configurable:
+            item = menu.addAction(action.settings_label)
+            item.triggered.connect(lambda _=False, identifier=action.id: QtCore.QTimer.singleShot(
+                0, lambda: self.open_action_settings(identifier, {'place': place, 'window': context.get('window')})))
+        (getattr(menu, 'exec', None) or menu.exec_)(global_pos)
 
     def trim_source(self, collection):
         """asset -> in/out points: the current collection's, or the user's own."""
@@ -1628,7 +1778,7 @@ class Browser(QtWidgets.QWidget):
         dialog.deleteLater()
         if created is not None:
             self.settings['libraries'].append(created)
-            self.reload(use_index_cache=False)
+            self.reload(use_index_cache=False, libraries=[created])
 
     def library_sort(self):
         if not self.require_admin():
@@ -1656,7 +1806,7 @@ class Browser(QtWidgets.QWidget):
         sorted_result = dialog.sort_result
         dialog.deleteLater()
         if sorted_result is not None:
-            self.reload(use_index_cache=False)
+            self.reload(use_index_cache=False, libraries=[library])
 
     def labels_from_names(self):
         if not self.require_admin():
@@ -1672,10 +1822,10 @@ class Browser(QtWidgets.QWidget):
         root = current.data(0, QtCore.Qt.UserRole)[0] if current else ''
         dialog = LabelsDialog(libraries, self.assets, self.settings, self.access, root, self)
         exec_dialog(dialog)
-        written = dialog.result
+        written, library = dialog.result, dialog.library.currentData()
         dialog.deleteLater()
         if written and written['changes']:
-            self.reload(use_index_cache=False)
+            self.reload(use_index_cache=False, libraries=[library])
             self.status.setText('Labels from names: %d labels written.' % len(written['changes']))
 
     def keyword_cleaner(self):
@@ -1692,10 +1842,10 @@ class Browser(QtWidgets.QWidget):
         root = current.data(0, QtCore.Qt.UserRole)[0] if current else ''
         dialog = KeywordsDialog(libraries, self.assets, self.main_selected(), self.settings, self.access, root, self)
         exec_dialog(dialog)
-        written = dialog.result
+        written, library = dialog.result, dialog.library.currentData()
         dialog.deleteLater()
         if written and written['changes']:
-            self.reload(use_index_cache=False)
+            self.reload(use_index_cache=False, libraries=[library])
             self.status.setText('Keyword cleaner: keywords of %d assets changed.' % len(written['changes']))
 
     def rescan_metadata(self):
@@ -1730,6 +1880,78 @@ class Browser(QtWidgets.QWidget):
         dialog.deleteLater()
         if accepted and scan and scan['results']:
             self.write_rescanned_metadata(scan['results'])
+
+    def change_category(self):
+        """Category change: move the selected assets of one library to another category, their
+        folders on disk included. In edit mode it uses the edit session's library lock; otherwise
+        it takes the library's edit lock for the move only."""
+        if not self.require_admin():
+            return
+        editing = bool(self.edit_mode and self.edit_session)
+        if editing and self.properties.changes():
+            return self.show_error('Write or cancel your property changes before changing the category.')
+        assets = list(self.edit_session['originals']) if editing else list(self.selected_assets())
+        if not assets:
+            return self.show_error('Category change works on a selection: select the assets to move.')
+        roots = {root_key(asset['library_root']) for asset in assets}
+        if len(roots) != 1:
+            return self.show_error('Category change works on one library at a time; the selection is in %d.'
+                                   % len(roots))
+        root = next(iter(roots))
+        try:
+            self.access.refresh()
+            library = writable_library(self.settings, self.access, assets[0])
+        except Exception as error:
+            return self.show_error(str(error))
+        handle = self.edit_session['locks'].get(root) if editing else None
+        if editing and handle is None:
+            return self.show_error('This edit session does not hold the lock of %s.' % library['name'])
+        categories = sorted({asset['category'] for asset in self.assets
+                             if root_key(asset['library_root']) == root and '/' not in asset['category']},
+                            key=str.casefold)
+        dialog = CategoryChangeDialog(library, assets, categories, self)
+        if not exec_dialog(dialog):
+            return
+        category = dialog.chosen()
+        dialog.deleteLater()
+
+        def progress(message):
+            # Repaint only: no other click may run while the library lock is held.
+            self.status.setText('Category change: ' + message)
+            self.status.repaint()
+        temporary = None
+        try:
+            require_admin(self.access)
+            if handle is None:  # Not editing: the library's edit lock, for the move only.
+                handle = temporary = self._acquire_edit_lock(library)
+            QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+            try:
+                database = Library(library['root'], library['name'], library.get('legacy_roots', []))
+                moves = database.change_category(assets, category, edit_token=handle['token'], progress=progress)
+            finally:
+                QtWidgets.QApplication.restoreOverrideCursor()
+        except Exception as error:
+            self.status.setText('Category change failed.')
+            return self.show_error('Category change failed: %s' % error)
+        finally:
+            if temporary is not None:
+                try:
+                    release_edit_lock(temporary)
+                except Exception as error:
+                    self.show_error('Could not remove the library lock: ' + str(error))
+        moved = [(old, dict(new, library=old.get('library'), library_root=old['library_root'])) for old, new in moves]
+        log.info('%s moved %d asset(s) of %s to category %s: %s', getattr(self.access, 'actor', self.access.identity),
+                 len(moved), library['root'], category, ', '.join(old['id'] for old, _ in moved))
+        try:
+            self.preferences.move_assets(moved)
+        except Exception as error:
+            self.show_error('The assets were moved, but your ratings and collections could not be updated: %s' % error)
+        # The moved assets have new paths and keys: end any edit session and read the library again.
+        if editing:
+            self._release_edit_session(update_selection=False)
+        self.reload(use_index_cache=False, libraries=[library])
+        self.status.setText('Category change: %d asset(s) moved to %s%s.' % (
+            len(moved), category, '; %d were already there' % (len(assets) - len(moved)) if len(moved) < len(assets) else ''))
 
     def require_admin(self):
         """Re-read the security file; only administrators may use Library tools."""

@@ -13,6 +13,9 @@ from .storage import atomic_json, library_lock, read_json  # noqa: F401
 from .thumbnail_cache import INDEX_CACHE_VERSION, cache_root, cached_library_index_path
 
 DATABASE_FILENAME = 'tinylib_data.json'
+# Record fields that hold file paths (a sequence may carry its range: "a.####.exr 1001-1100").
+PATH_ROLES = ('main', 'main-original', 'thumb', 'proxy', 'filmstrip', 'highres', 'scene')
+_RANGE = re.compile(r'^(.*?)(\s+-?\d+--?\d+)?$', re.S)
 
 def split_sequence(value):
     match = re.match(r'^(.*?)\s+(-?\d+)-(-?\d+)$', str(value))
@@ -438,6 +441,155 @@ class Library:
                                 % (original['name'], len(failed), folder, failed[0]))
         return problems
 
+    def change_category(self, originals, category, edit_token=None, progress=None):
+        """Move assets to ``category`` in this library: their folders on disk and their records.
+
+        Each asset folder ``<root>/<old category>/<name>`` is renamed to
+        ``<root>/<category>/<name>`` (a rename inside the library: nothing is copied or
+        deleted), then the database is written once with the new category, id and paths.
+
+        Everything is checked before anything moves: every asset must still be in the
+        database exactly as loaded, stored in its own plain ``<category>/<name>`` folder (no
+        links or junctions, see ``asset_folder``) with every listed file inside it and no
+        other asset's files in it, and the target folder and id must not exist. If a rename
+        or the database write fails, the folders already moved are renamed back. Assets
+        already in ``category`` are skipped.
+
+        Returns ``[(original, new normalized record)]``.
+        """
+        report = progress or (lambda message: None)
+        category = safe_component(str(category))
+        if category.startswith('.'):
+            raise ValueError('A category name cannot start with a dot: %r' % category)
+        database = self.root / DATABASE_FILENAME
+        if not database.exists():
+            raise ValueError('%s has no %s; categories can only be changed in a library with a database.'
+                             % (self.root, DATABASE_FILENAME))
+        with library_lock(self.root):
+            from .edit_lock import assert_edit_write_allowed
+            assert_edit_write_allowed(self.root, edit_token)
+            document = read_json(database)
+            if document.get('schema_version') != 3 or not isinstance(document.get('assets'), list):
+                raise ValueError('Category change requires a schema_version 3 %s.' % DATABASE_FILENAME)
+            records = document['assets']
+            keys = [(record.get('id'), self.resolve(record.get('main', ''))) for record in records]
+            # Every file path each record lists, as written and (mains only, like delete_assets) as
+            # resolved, to find any other asset that keeps a file in a folder about to move.
+            listed = [[self.resolve(_RANGE.match(str(record.get(role) or ''))[1])
+                       for role in PATH_ROLES if record.get(role)] for record in records]
+            target_parent = self.root / category
+            if is_link(target_parent):
+                raise ValueError('The category folder %s is a link or junction.' % target_parent)
+            existing = {str(record.get('category', '')) for record in records}
+            try:
+                existing.update(item.name for item in self.root.iterdir() if item.is_dir())
+            except OSError as error:
+                raise ValueError('Cannot list %s: %s' % (self.root, error))
+            spelled = [item for item in existing if item.casefold() == category.casefold() and item != category]
+            if spelled:
+                raise ValueError('The category %r already exists as %r; choose that spelling.' % (category, spelled[0]))
+            resolved_mains = None
+            plan, targets = [], set()
+            report('Checking %d asset(s)…' % len(originals))
+            for original in originals:
+                name = original.get('name', original.get('id'))
+                rows = [row for row, key in enumerate(keys) if key == (original.get('id'), original.get('main'))]
+                if len(rows) != 1:
+                    raise ValueError('%s %s. Refresh the library first.' % (
+                        name, 'changed or disappeared' if not rows else 'is in the database %d times' % len(rows)))
+                row = rows[0]
+                current = self.normalize(records[row], discover_media=False)
+                if current.get('category') == category:
+                    continue
+                folder, reason = self.asset_folder(current)
+                if folder is None:
+                    raise ValueError('%s cannot be moved: %s.' % (name, reason))
+                if not folder.is_dir():
+                    raise ValueError('%s cannot be moved: its folder is missing: %s' % (name, folder))
+                for role in PATH_ROLES:
+                    path = _RANGE.match(str(current.get(role) or ''))[1]
+                    if path and not _inside(path, folder):
+                        raise ValueError('%s cannot be moved: its %s is outside its folder: %s' % (name, role, path))
+                for other, paths in enumerate(listed):
+                    if other != row and any(_inside(path, folder) for path in paths):
+                        raise ValueError('%s cannot be moved: the asset %s has files in %s.' % (name, keys[other][0], folder))
+                if resolved_mains is None:  # Resolving touches the share: once, and only when something moves.
+                    resolved_mains = [_resolved(key[1]) if key[1] else None for key in keys]
+                real = _resolved(folder)
+                for other, main in enumerate(resolved_mains):
+                    if other != row and main is not None and (main == real or real in main.parents):
+                        raise ValueError('%s cannot be moved: the asset %s is stored in %s (under another path).'
+                                         % (name, keys[other][0], folder))
+                target = target_parent / folder.name
+                new_id = category + '/' + current['name']
+                if os.path.lexists(target):
+                    raise ValueError('%s cannot be moved: %s already exists.' % (name, target))
+                if new_id.casefold() in targets or any(str(key[0]).casefold() == new_id.casefold() for key in keys):
+                    raise ValueError('%s cannot be moved: an asset %s already exists.' % (name, new_id))
+                targets.add(new_id.casefold())
+                plan.append((original, row, folder, target, new_id))
+            if not plan:
+                return []
+            created = not target_parent.exists()
+            moved = []
+            try:
+                target_parent.mkdir(exist_ok=True)
+                for index, (original, row, folder, target, new_id) in enumerate(plan, 1):
+                    report('Moving %d/%d: %s' % (index, len(plan), folder.name))
+                    os.rename(folder, target)
+                    moved.append((folder, target))
+                for original, row, folder, target, new_id in plan:
+                    record = records[row]
+                    record['category'], record['id'] = category, new_id
+                    for role in PATH_ROLES:
+                        if record.get(role):
+                            record[role] = self._moved_path(record[role], folder, target)
+                report('Saving the library database…')
+                try:
+                    atomic_json(database, document)
+                except BaseException:
+                    # Over SMB a rename can reach the server and still report an error. When the
+                    # database already holds the new records, the move happened: keep the folders.
+                    try:
+                        landed = read_json(database) == document
+                    except Exception:
+                        landed = False
+                    if not landed:
+                        raise
+            except BaseException as error:
+                stuck = []
+                for folder, target in reversed(moved):
+                    try:
+                        os.rename(target, folder)
+                    except OSError as undo:
+                        stuck.append('%s (still at %s: %s)' % (folder, target, undo))
+                if created:
+                    try:
+                        target_parent.rmdir()
+                    except OSError:
+                        pass
+                if stuck:
+                    raise RuntimeError('Category change failed (%s) and these folders could not be moved back; the '
+                                       'database was not changed, so move them back by hand:\n%s'
+                                       % (error, '\n'.join(stuck))) from error
+                raise
+            for folder, _ in moved:  # An old category folder left empty goes; anything in it stays.
+                try:
+                    folder.parent.rmdir()
+                except OSError:
+                    pass
+            return [(original, self.normalize(records[row], discover_media=False))
+                    for original, row, folder, target, new_id in plan]
+
+    def _moved_path(self, value, folder, target):
+        """``value`` (a record path inside ``folder``) moved into ``target``, keeping a sequence
+        range. Written relative to the library root, as ingest writes paths: an absolute path,
+        or one under a legacy root, would only resolve where that spelling works."""
+        path, suffix = _RANGE.match(str(value)).groups()
+        relative = os.path.relpath(os.path.normpath(self.resolve(path)), os.path.normpath(str(folder)))
+        moved = Path(target) / relative if relative != '.' else Path(target)
+        return moved.relative_to(self.root).as_posix() + (suffix or '')
+
     def publish(self, record, staging=None, edit_token=None):
         """Reread under lock and append one completed asset to the current database.
 
@@ -486,6 +638,13 @@ def _resolved(path):
         return Path(path).resolve()
     except (OSError, RuntimeError):
         return Path(os.path.abspath(path))
+
+
+def _inside(path, folder):
+    """Whether ``path`` is ``folder`` or inside it (spelling and case as Windows compares them)."""
+    path = os.path.normcase(os.path.normpath(str(path)))
+    folder = os.path.normcase(os.path.normpath(str(folder)))
+    return path == folder or path.startswith(folder.rstrip(os.sep) + os.sep)
 
 
 def is_link(path):

@@ -66,6 +66,22 @@ Cleans asset keywords in one writable library at a time. Pick the library in the
 
 The same keyword (ignoring case) is kept once; the order of the other keywords is kept. The preview lists every asset whose keywords change, with its keywords now and after. **Apply keywords** re-reads the library database and writes them with the same edit lock, administrator override and atomic write as editing, then the browser reloads.
 
+### Category change…
+
+Moves assets to another category of the same library: their folders on disk and their records. Select the assets and choose **Category change…**. It works on the selection, never a whole library, and on one library at a time. It also works in edit mode, on the assets being edited (the other library tools need edit mode off); write or cancel property changes first. Outside edit mode it takes the library's edit lock for the move only, like the other tools.
+
+Pick an existing category of the library or type a new one (one folder name). Each asset folder `<library>/<old category>/<name>` is renamed to `<library>/<category>/<name>`; nothing is copied or deleted. The asset's category, id (`category/name`) and every file path in its record (main, main-original, highres, proxy, thumbnail, filmstrip, scene) follow, in one database write under the library edit lock. An old category folder left empty is removed. Assets already in the category stay where they are.
+
+Everything is checked before anything moves, and nothing changes when a check fails:
+
+- every asset is still in the database exactly as loaded;
+- it is stored in its own `<category>/<name>` folder, which is not a link or junction, every file its record lists is inside that folder, and no other asset is stored in it (assets with hand-made layouts cannot be moved);
+- the target folder and the new id do not exist yet, and two selected assets do not have the same name.
+
+A folder Windows will not rename (a file in it is open, in Nuke or a player) stops the change: the folders already moved are renamed back and the database is not written. The same happens when the database cannot be written. If a folder cannot be renamed back either, the message names it so it can be moved back by hand; the database still has the old paths. Afterwards edit mode ends, if it was on, and the library is read again.
+
+Ratings, in/out points and collection entries are kept by the main file's path. Yours follow the moved assets; other users' no longer find them (their collections show those entries as unavailable).
+
 ### Create new library…
 
 Asks for a name, root folder and settings source: Studio defaults or an existing library. You can change the copied read-only setting.

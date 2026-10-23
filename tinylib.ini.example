@@ -23,6 +23,11 @@ oiiotool = oiiotool
 vfx_transcode = vfx-transcode
 # AYON launcher console, for the Publish to AYON action outside an AYON-launched Nuke.
 # ayon_console = C:/Program Files/Ynput/AYON 1.6.3/ayon_console.exe
+# Players and other programs for actions, e.g. Open in Player lists every tool here except
+# TinyLib's own (ffmpeg, ffprobe, ffplay, oiiotool, vfx_transcode, ocio, ayon_console).
+# rv = C:/Program Files/Autodesk/RV-2025.0.0/bin/rv.exe
+# djv = C:/Program Files/DJV2/bin/djv.exe
+# mrv2 = C:/Program Files/mrv2-v1.4.0/bin/mrv2.exe
 # OCIO config for generated previews; overrides each profile's "ocio_config".
 # A path, or a built-in config such as ocio://studio-config-latest.
 # ocio = //studio/pipeline/ocio/aces_1.2/config.ocio

@@ -2,9 +2,10 @@ from .qt import QtCore, QtGui, QtWidgets
 
 
 _ICONS = {}
+SETTINGS_PREFIX = 'settings:'  # item data of a "… settings…" entry: the prefix and the action id
 
 
-def _icon(path):
+def action_icon(path):
     if not path:
         return QtGui.QIcon()
     if str(path) not in _ICONS:
@@ -38,13 +39,14 @@ class ActionPicker(QtWidgets.QWidget):
             self.preferred = identifier
             self.chosen.emit(identifier)
 
-    def populate(self, actions, prompt='Pick action…', scope=''):
+    def populate(self, actions, prompt='Pick action…', scope='', configurable=()):
         """List ``actions``. ``prompt`` is the first entry and ``scope`` the tooltip: what the
-        action will run on (the selection, or every asset shown)."""
+        action will run on (the selection, or every asset shown). ``configurable`` actions get a
+        "… settings…" entry, listed whatever is selected."""
         self.setToolTip(scope)
         self.combo.setToolTip(scope)
         # Called on every selection change; rebuilding reads icon PNGs from the network.
-        signature = (tuple(action.id for action in actions), prompt)
+        signature = (tuple(action.id for action in actions), tuple(action.id for action in configurable), prompt)
         if signature == getattr(self, '_signature', None):
             return
         self._signature = signature
@@ -53,10 +55,15 @@ class ActionPicker(QtWidgets.QWidget):
         self.combo.addItem(prompt, '')
         for action in sorted(actions, key=lambda a: (a.manifest['category'], a.manifest['name'])):
             label = action.manifest['category'] + ' / ' + action.manifest['name']
-            self.combo.addItem(_icon(action.icon), label, action.id)
+            self.combo.addItem(action_icon(action.icon), label, action.id)
+        if configurable:
+            self.combo.insertSeparator(self.combo.count())
+        for action in sorted(configurable, key=lambda a: (a.manifest['category'], a.manifest['name'])):
+            self.combo.addItem(action_icon(action.icon), action.manifest['category'] + ' / ' + action.settings_label,
+                               SETTINGS_PREFIX + action.id)
         index = self.combo.findData(current) if current else -1
         if index <= 0 and self.preferred:
             index = self.combo.findData(self.preferred)
         if index > 0:
             self.combo.setCurrentIndex(index)
-        self.button.setEnabled(bool(actions))
+        self.button.setEnabled(bool(actions) or bool(configurable))

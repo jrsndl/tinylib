@@ -5,6 +5,7 @@ from .qt import QtCore, QtWidgets
 from .preferences import asset_key, ASSET_MIME
 from .views import AssetModel, Grid, DetailsView
 from .action_ui import ActionPicker
+from .access import copy_denied_libraries
 from .path_format import format_assets
 
 
@@ -90,6 +91,7 @@ class CollectionsPanel(QtWidgets.QWidget):
         self.items = self.grid
         self.grid.cards.width = 180
         self.model = AssetModel(self)
+        self.model.copy_allowed = access.can_copy
         self.grid.setModel(self.model)
         self.table = CollectionTable(self.grid.cards)
         self.table.setModel(self.model)
@@ -251,6 +253,10 @@ class CollectionsPanel(QtWidgets.QWidget):
             assets = selected
         if not assets:
             self.error.emit('The current collection has no accessible assets to copy.')
+            return
+        self.access.refresh()
+        if not self.access.can_copy(assets):
+            self.error.emit('You are not allowed to copy asset paths from %s.' % copy_denied_libraries(assets, self.access))
             return
         notation = self.preferences.data.get('display', {}).get('path_notation', 'nuke')
         QtWidgets.QApplication.clipboard().setText(format_assets(assets, notation, self.trim_for))

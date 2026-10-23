@@ -5,6 +5,7 @@ import re
 import sys
 import uuid
 from pathlib import Path
+from .access import CAPABILITIES
 from .library import read_json, split_sequence
 from .log import get_logger
 
@@ -19,6 +20,9 @@ def host_name():
     if 'maya.cmds' in sys.modules:
         return 'maya'
     return 'standalone'
+
+
+MENU_PLACES = ('main', 'collection', 'player')
 
 
 def local_file(folder, value):
@@ -55,6 +59,20 @@ class Action:
         self.icon = local_file(self.folder, icon) if icon else None
         if self.icon and (self.icon.suffix.lower() != '.png' or not self.icon.is_file()):
             raise ValueError('Action icon must be an existing PNG.')
+        if not isinstance(self.manifest.get('settings', False), bool):
+            raise ValueError('settings must be true or false.')
+        tools = self.manifest.get('tools', [])
+        if not isinstance(tools, list) or not all(isinstance(tool, str) and tool.strip() for tool in tools):
+            raise ValueError('tools must be a list of [tools] names from tinylib.ini.')
+        menu = self.manifest.get('context_menu', False)
+        if isinstance(menu, dict):
+            if 'label' in menu and (not isinstance(menu['label'], str) or not menu['label'].strip()):
+                raise ValueError('context_menu.label must be text.')
+            places = menu.get('where', list(MENU_PLACES))
+            if not isinstance(places, list) or not places or any(place not in MENU_PLACES for place in places):
+                raise ValueError('context_menu.where must list some of: ' + ', '.join(MENU_PLACES))
+        elif not isinstance(menu, bool):
+            raise ValueError('context_menu must be true, false or an object.')
         rules = self.manifest.get('asset_filter', {})
         hosts = self.manifest.get('hosts', [])
         if not isinstance(hosts, list) or not all(isinstance(host, str) for host in hosts):
@@ -64,9 +82,55 @@ class Action:
         for field in ('min_selection', 'max_selection'):
             if field in rules and (type(rules[field]) is not int or rules[field] < 1):
                 raise ValueError(field + ' must be a positive integer.')
+        permissions = self.manifest.get('permissions', [])
+        if not isinstance(permissions, list) or any(item not in CAPABILITIES for item in permissions):
+            raise ValueError('permissions must be a list of library capabilities: ' + ', '.join(CAPABILITIES))
+        if 'whole_view' in rules and type(rules['whole_view']) is not bool:
+            raise ValueError('Asset filter whole_view must be true or false.')
         for field in ('kinds', 'extensions', 'requires'):
             if field in rules and (not isinstance(rules[field], list) or not all(isinstance(v, str) for v in rules[field])):
                 raise ValueError('Asset filter ' + field + ' must be a list of strings.')
+
+    @property
+    def tools(self):
+        """External programs the action runs, by their name under [tools] in tinylib.ini."""
+        return list(self.manifest.get('tools', []))
+
+    @property
+    def has_settings(self):
+        """The action has its own settings window, offered at any time (no selection needed)."""
+        return bool(self.manifest.get('settings', False))
+
+    @property
+    def settings_label(self):
+        return self.manifest['name'] + ' settings…'
+
+    def host_allowed(self, host=None):
+        hosts = self.manifest.get('hosts', [])
+        return not hosts or (host or host_name()) in hosts
+
+    def in_menu(self, place):
+        """Is the action in the right-click menu of ``place`` (main, collection or player)?"""
+        menu = self.manifest.get('context_menu', False)
+        if isinstance(menu, dict):
+            return place in menu.get('where', MENU_PLACES)
+        return bool(menu)
+
+    @property
+    def menu_label(self):
+        menu = self.manifest.get('context_menu')
+        return menu.get('label', self.manifest['name']) if isinstance(menu, dict) else self.manifest['name']
+
+    @property
+    def permissions(self):
+        """Library capabilities the action needs besides ``actions``, e.g. ``["copy"]``."""
+        return list(self.manifest.get('permissions', []))
+
+    @property
+    def whole_view(self):
+        """False when the action needs a selection in the main view (it never runs on everything
+        the main view shows). Collections still run it on the whole collection."""
+        return self.manifest.get('asset_filter', {}).get('whole_view', True)
 
     def accepts(self, assets, host=None):
         host = host or host_name()
@@ -95,6 +159,8 @@ class ActionRegistry:
         self.roots = roots
         self.actions = {}
         self.errors = []
+        # name -> bool: is this [tools] program found? The browser sets it; None skips the check.
+        self.tool_available = None
         self.reload()
 
     def reload(self):
@@ -119,19 +185,38 @@ class ActionRegistry:
     def allowed(self, action, assets, access, host=None):
         # Permissions are per library: check each library once, so a whole view stays fast.
         roots = {asset['library_root'] for asset in assets}
+        if self.tool_available is not None and not all(self.tool_available(tool) for tool in action.tools):
+            return False
         return (action.allow_only is None or bool(access.groups.intersection(action.allow_only))) and bool(assets) and action.accepts(assets, host) and all(
-            access.can(root, 'view') and access.can(root, 'action', action.id) for root in roots)
+            access.can(root, 'view') and access.can(root, 'action', action.id)
+            and all(access.can(root, capability) for capability in action.permissions) for root in roots)
 
-    def run(self, identifier, assets, access, context=None):
+    def configurable(self, action, access, host=None):
+        """May the user open the action's settings? Its host, group and tool rules apply, but
+        no assets are involved, so no library permission is needed."""
+        if not action.has_settings or not access.groups or not action.host_allowed(host):
+            return False
+        if self.tool_available is not None and not all(self.tool_available(tool) for tool in action.tools):
+            return False
+        return action.allow_only is None or bool(access.groups.intersection(action.allow_only))
+
+    def run(self, identifier, assets, access, context=None, settings=False):
+        """Run an action on ``assets``; with ``settings`` open its settings instead: no assets,
+        and the context's ``invoked`` is ``'settings'``."""
         access.refresh()
         if identifier not in self.actions:
             raise ValueError('Unknown action: ' + identifier)
         # Revalidate the manifest at execution time, without running Python during discovery.
         action = Action(self.actions[identifier].folder)
-        if action.id != identifier or not self.allowed(action, assets, access):
+        if settings:
+            if action.id != identifier or not self.configurable(action, access):
+                raise PermissionError('You cannot open the settings of this action.')
+            assets, context = [], dict(context or {}, invoked='settings')
+        elif action.id != identifier or not self.allowed(action, assets, access):
             raise PermissionError('Action is not permitted for this selection.')
         config = read_json(action.config_path)
-        log.info('%s runs action %s on %d asset(s)', getattr(access, 'actor', access.identity), action.id, len(assets))
+        log.info('%s runs action %s %s', getattr(access, 'actor', access.identity), action.id,
+                 '(settings)' if settings else 'on %d asset(s)' % len(assets))
         module_name = '_tinylib_action_' + uuid.uuid4().hex
         spec = importlib.util.spec_from_file_location(module_name, action.code)
         module = importlib.util.module_from_spec(spec)

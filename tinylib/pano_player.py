@@ -423,6 +423,7 @@ class PanoViewer(QtWidgets.QWidget):
     rating_requested = QtCore.Signal(int)
     trim_requested = QtCore.Signal(object)  # never emitted: a still has no in/out points
     navigate_requested = QtCore.Signal(int)  # PgUp -1 / PgDn +1: the previous or next asset
+    context_menu_requested = QtCore.Signal(object)  # global QPoint: right-click, for the actions menu
 
     HELP = '\n'.join([  # one control per line
         'Drag: look around',
@@ -655,6 +656,10 @@ class PanoViewer(QtWidgets.QWidget):
 
     def focusNextPrevChild(self, forward):
         return False  # Tab switches proxy/main instead of moving focus.
+
+    def contextMenuEvent(self, event):
+        self.context_menu_requested.emit(event.globalPos())
+        event.accept()
 
     def keyPressEvent(self, event):
         key = event.key()

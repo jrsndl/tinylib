@@ -39,6 +39,7 @@ def root_key(root):
 def default_permissions():
     return {'view': ['users', 'managers', 'admins'], 'ingest': ['admins'],
             'edit': ['managers', 'admins'], 'actions': ['users', 'managers', 'admins'],
+            'copy': ['users', 'managers', 'admins'],
             'version_fields': ['admins'], 'ingest_fields': ['managers', 'admins'],
             'acquire_fields': ['managers', 'admins']}
 
@@ -212,6 +213,12 @@ class AccessControl:
             return False
         return bool(self.groups.intersection(grants))
 
+    def can_copy(self, assets):
+        """May these assets' paths and pictures leave TinyLib (drag, Ctrl+C, Copy)? Needs the
+        ``copy`` capability on every library involved."""
+        roots = {asset.get('library_root', '') for asset in assets}
+        return all(self.can(root, 'view') and self.can(root, 'copy') for root in roots)
+
     def require(self, root, capability, action=None):
         if not self.can(root, 'view') or not self.can(root, capability, action):
             raise PermissionError(self.error or 'Your groups do not permit %s%s for this library.' %
@@ -258,6 +265,13 @@ class AccessControl:
             if error.errno is None:  # Raised by TinyLib's own checks, not by Windows.
                 raise
             raise PermissionError(security_write_denied(self.path)) from error
+
+
+def copy_denied_libraries(assets, access):
+    """The names of the libraries whose assets may not be copied, for messages."""
+    names = sorted({asset.get('library') or asset.get('library_root', '') for asset in assets
+                    if not access.can_copy([asset])})
+    return ', '.join(names) if names else 'these libraries'
 
 
 def security_write_denied(path):

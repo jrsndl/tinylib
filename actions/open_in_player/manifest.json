@@ -1,0 +1,6 @@
+{
+  "id": "player.open", "name": "Open in Player", "version": "1.0.0",
+  "category": "Viewers", "entrypoint": "action.py", "config": "config.json",
+  "context_menu": true, "settings": true,
+  "asset_filter": {"kinds": ["footage", "still"], "requires": ["main"], "min_selection": 1, "whole_view": false}
+}

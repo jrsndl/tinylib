@@ -133,6 +133,7 @@ Set tools in the `[tools]` section of [`tinylib.ini`](#tinylibini). Because that
 | `vfx_transcode` | `vfx-transcode` | Proxies, thumbnails and filmstrips of EXR image sequences; see `proxy_backend` under [profiles](#profiles). When it is not found on a worker, that worker uses the built-in path. Needs version 2026.09 or newer. |
 | `ffplay` | `ffplay` beside `ffmpeg`, else `ffplay` on PATH | Only with `"player_backend": "ffplay"`. |
 | `ayon_console` | beside `AYON_EXECUTABLE` | The AYON launcher console (`ayon_console.exe`) that runs [Publish to AYON](ayon-publish.md). Needed outside a host started from AYON. |
+| any other name, e.g. `rv`, `djv`, `mrv2` | that name on PATH | Programs that [actions](actions-and-access.md#external-tools) run. **Open in Player** offers every tool except TinyLib's own (`ffmpeg`, `ffprobe`, `ffplay`, `oiiotool`, `vfx_transcode`, `ocio`, `ayon_console`). |
 | `ocio` | the profile's `ocio_config` | OCIO config file for every processing profile on this machine; overrides `ocio_config`. A path, or a built-in config such as `ocio://studio-config-latest` (OCIO 2.2+). Set it on farm workers that have no `OCIO` environment variable. |
 
 The farm worker uses the tools from **its own** `tinylib.ini` (and configuration), never from the job manifest. External tools time out: probes after 60 seconds, each conversion step after one hour.
@@ -253,7 +254,7 @@ Named by `security` in `tinylib.ini`. Artists need read access; only administrat
 
 ### Capabilities
 
-`access.defaults` and `libraries[].permissions` use the same seven keys:
+`access.defaults` and `libraries[].permissions` use the same eight keys:
 
 | Capability | Built-in default | Allows |
 | --- | --- | --- |
@@ -261,6 +262,7 @@ Named by `security` in `tinylib.ini`. Artists need read access; only administrat
 | `ingest` | admins | Ingesting into the library (workstation and farm worker). |
 | `edit` | managers, admins | Editing asset properties, metadata writes. |
 | `actions` | users, managers, admins | Running studio actions on its assets. |
+| `copy` | users, managers, admins | Taking its assets out of TinyLib: dragging assets to other applications, **Ctrl+C** and collection **Copy** of paths (in the **Paths** notation), **Ctrl+C** of a player frame, and actions that declare `"permissions": ["copy"]` (the bundled Copy main paths and Copy Assets). Without it the library can still be browsed and played, and assets dragged into collections. |
 | `version_fields` | admins | Seeing and editing fields whose names start with `version`. |
 | `ingest_fields` | managers, admins | Seeing and editing fields whose names start with `ingest`. |
 | `acquire_fields` | managers, admins | Seeing and editing fields whose names start with `acquire`. |
@@ -269,6 +271,7 @@ Named by `security` in `tinylib.ini`. Artists need read access; only administrat
 - Other users get the union of their groups' grants. `restricted` has no default grants and does not remove grants from another group.
 - A capability missing from a library's `permissions` inherits the studio default; an explicit `[]` denies all non-admins.
 - A library not listed in the security file grants nothing to non-admins.
+- To let a group see a library without copying from it, grant it `view` but not `copy`, e.g. `"view": ["users", "managers", "admins", "restricted"]` and `"copy": ["users", "managers", "admins"]`. Grants add up, so this works for accounts that are only in `restricted`.
 - Old per-action mappings (an object instead of a list under `actions`) are ignored in favor of the studio `actions` default.
 
 ### Failing closed

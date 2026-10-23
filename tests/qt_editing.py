@@ -44,7 +44,8 @@ assert window.library_tools_menu.menuAction().isVisible()
 assert window.user_button.text() == login_name(window.access.identity)
 assert [action.text() for action in window.library_tools_menu.actions()] == [
     'Library crosscheck…', 'Rescan metadata…', 'Library sort…', 'Labels from names…', 'Keyword cleaner…',
-    'Create new library…']
+    'Category change…', 'Create new library…']
+assert window.category_action.isEnabled()  # also in edit mode, unlike the other tools
 assert 'font-size' not in STYLE and 'font-family' not in STYLE
 assert window.font().family() == UI_FONT_FAMILY and window.font().pointSize() == UI_FONT_SIZE
 

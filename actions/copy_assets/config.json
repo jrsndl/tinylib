@@ -1,0 +1,9 @@
+{
+  "template": ".",
+  "component": "main",
+  "subfolders": true,
+  "in_out": false,
+  "overwrite": false,
+  "nuke_reads": true,
+  "frame_mode": "none"
+}

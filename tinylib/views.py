@@ -274,6 +274,16 @@ class ImageCache(QtCore.QObject):
         self.activity.emit(self.snapshot())
         self.changed.emit()
 
+    def forget(self, path):
+        """Read ``path`` again on its next use: the file was replaced (a picked thumbnail). The
+        small poster stays until the new image arrives; the disk cache is keyed by the file's size
+        and modification time, so it never serves the old image."""
+        previous = self.images.pop(path, None)
+        if previous is not None:
+            self.bytes -= previous.width() * previous.height() * 4
+        self.evicted.pop(path, None)
+        self.changed.emit()
+
     def snapshot(self):
         seconds = time.perf_counter() - self.started_at if self.started_at is not None else 0.0
         return {'requested': self.requested, 'completed': self.completed,
@@ -311,6 +321,8 @@ class AssetModel(QtCore.QAbstractTableModel):
         self.collection_origin = None
         self.path_notation = 'nuke'
         self.trim_for = None  # asset -> (in, out) for dragged paths, set by the owner.
+        # assets -> bool: may their paths leave TinyLib (drag text)? Set by the owner; None allows.
+        self.copy_allowed = None
         self.revision = 0
         self.marked_keys = set()  # asset_key()s marked for deletion in edit mode
 
@@ -371,7 +383,10 @@ class AssetModel(QtCore.QAbstractTableModel):
         if self.collection_origin:
             origin = dict(self.collection_origin, keys=[self.assets[row].get('_collection_key') or asset_key(self.assets[row]) for row in rows])
             data.setData(COLLECTION_MIME, json.dumps(origin).encode('utf-8'))
-        data.setText(format_assets([self.assets[row] for row in rows], self.path_notation, self.trim_for))
+        dragged = [self.assets[row] for row in rows]
+        # Without the copy permission a drag still reaches TinyLib's own collections, never other apps.
+        if self.copy_allowed is None or self.copy_allowed(dragged):
+            data.setText(format_assets(dragged, self.path_notation, self.trim_for))
         return data
 
     def supportedDragActions(self):

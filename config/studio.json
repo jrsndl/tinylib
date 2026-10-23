@@ -90,6 +90,11 @@
         "managers",
         "admins"
       ],
+      "copy": [
+        "users",
+        "managers",
+        "admins"
+      ],
       "version_fields": [
         "admins"
       ],

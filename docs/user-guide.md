@@ -62,7 +62,7 @@ Example: `{name}\n{type} · {width} × {height}`. The default is `{name}\n{width
 
 ## Paths
 
-**Paths**, in [Preferences](#preferences), chooses your file-sequence notation for external drag-and-drop, **Ctrl+C**, collection **Copy**, and the bundled Copy paths action. The default is Nuke. All output uses forward slashes.
+**Paths**, in [Preferences](#preferences), chooses your file-sequence notation for external drag-and-drop, **Ctrl+C**, collection **Copy**, and the bundled Copy paths action. The default is Nuke. All output uses forward slashes. Copying needs the library's `copy` permission: without it, dragging assets to other applications carries no paths, **Ctrl+C** and **Copy** report that copying is not allowed, and the copy actions are not offered; you can still browse, play and collect the assets.
 
 | Notation | Example |
 | --- | --- |
@@ -129,10 +129,17 @@ The player decodes the proxy (or the thumbnail for stills) with FFmpeg and start
 | **F** | Toggle the frame-number overlay. |
 | **0–5** | Set the asset's personal star rating; `0` clears it. |
 | **PgUp / PgDn** | Previous / next asset, in the same window: the next asset replaces this one. Opened from the main view, the player steps through the assets the main view shows now, filtered and sorted as it is; opened from the current collection, through that collection. Opened from the Properties panel, it steps through the list the shown asset was selected in: the main view, or the collection when the asset was selected there. Both ends wrap: PgDn on the last asset opens the first, PgUp on the first the last. The next asset opens the way you left the last one: playing (same direction and speed) or stopped, with Loop and the frame overlay as they were; in the 360 viewer flat or sphere, proxy or HDR (main or highres), with the same exposure and gamma. A lat-long still opens in the 360 viewer and other assets in the review player, so the window type can change on the way. |
-| **Ctrl+C** | While stopped, copy the current proxy frame to the clipboard at the proxy's native resolution, without overlay or controls. |
+| **Ctrl+C** | While stopped, copy the current proxy frame to the clipboard at the proxy's native resolution, without overlay or controls. Needs the library's `copy` permission. |
 | **Hover near the bottom** | Reveal the timeline and current time; click or drag its indicator to scrub. Scrubbing stops playback. |
+| **Set as thumbnail** | Footage, beside **Loop**: replace the asset's thumbnail with the current frame. See [picked thumbnails](#picked-thumbnails). |
 | **Loop** | On by default for each player window. Wraps in both directions between the in and out points (the whole clip when none are set); when off, playback stops at the in or out point and resets speed. |
 | **Esc / Q** | Close the player. |
+
+### Picked thumbnails
+
+**Set as thumbnail**, in the player's bottom bar beside **Loop**, replaces a Footage asset's thumbnail file with the frame on screen. It is shown to administrators and to users with the library's edit or ingest permission, never in a read-only library, and works only while the player is stopped. The rights are checked again when you click.
+
+The frame is read at the proxy's full resolution. The proxy's black padding is cropped using the main's aspect ratio, and the picture is fitted into the size of the thumbnail it replaces, with black padding, as generated thumbnails are. The new file has the old one's file type and pixel size (a generated Footage thumbnail is a 960 × 506 JPEG), is written beside it and then swapped in; the library database does not change. Your browser shows the new thumbnail at once; other open TinyLib windows show it after a restart.
 
 ### In and out points
 
@@ -166,7 +173,36 @@ The viewer needs OpenGL 3.0. Decoding the main needs numpy, which Nuke and the s
 
 ## Actions and Nuke import
 
-The properties action dropdown runs a studio action on the main-view selection or, with nothing selected, on every asset the main view shows (filtered as it is); its first entry then reads **Pick action for all N shown…**, and running it on more than one asset asks first. The collection dropdown runs an action on the whole collection. Each dropdown remembers the last action you picked (in your user preferences) and preselects it whenever it is available. An action is listed only when it suits every asset it would run on (its asset filter) and the host. Bundled actions import main or highres into Nuke, copy paths and [publish to AYON](ayon-publish.md). Main and highres imports create Read nodes with explicit frame ranges and color space; an unknown project color space is reported instead of silently using a different one. Which actions you see depends on your groups and the host (see [studio actions and access](actions-and-access.md)).
+The properties action dropdown runs a studio action on the main-view selection or, with nothing selected, on every asset the main view shows (filtered as it is); its first entry then reads **Pick action for all N shown…**, and running it on more than one asset asks first. The collection dropdown runs an action on the whole collection. Each dropdown remembers the last action you picked (in your user preferences) and preselects it whenever it is available. An action is listed only when it suits every asset it would run on (its asset filter) and the host. Bundled actions import main or highres into Nuke, copy paths, [copy assets](#copy-assets), [open assets in a player](#open-in-player) and [publish to AYON](ayon-publish.md). Right-click assets in the main view, the collection panel or a player window for the actions that offer themselves there. Main and highres imports create Read nodes with explicit frame ranges and color space; an unknown project color space is reported instead of silently using a different one. Which actions you see depends on your groups and the host (see [studio actions and access](actions-and-access.md)).
+
+### Open in Player
+
+**Open in Player** (category Viewers) opens footage and stills in an external player such as RV, DJV or mrViewer. The players are the programs an administrator set under `[tools]` in `tinylib.ini`; TinyLib's own tools (FFmpeg, oiiotool…) are not offered.
+
+- Run it from the action dropdown to choose the settings: **Player**, **Arguments per asset**, **In/out arguments (one asset)**, optional **Arguments before the assets** (e.g. `-fullscreen`), **Component** (main, highres or proxy), **Only the frames from in to out**, and **All assets in one player** or **One player per asset**. **Command** shows what will run. **Save** keeps the settings in your user preferences; **Save and open** also opens the selected assets.
+- **Open in Player settings…** opens the settings at any time, with or without a selection: it is at the end of both action dropdowns and of the right-click menus. Opened this way the window has **Save** only, and **Command** shows an example sequence.
+- Right-click assets (main view, collection panel) or a player window and choose **Open in Player** to open them with the saved settings at once. Until settings are saved, or when the saved player is no longer available, the settings window opens first.
+- Each player starts with its usual arguments, filled in again when you pick another player (what you typed stays):
+  - **RV** (`rv`): `{rv}`, the sequence with its frame range (`fire.1010-1020#.exr`), so in/out points apply to every asset.
+  - **DJV** (`djv`): `{first_file}`, the first frame (DJV finds the rest of the sequence); when DJV opens one asset whose in/out points narrow it, `-timeUnits Frames -inPoint {first} -outPoint {last}` is added. DJV takes each option once and applies it to the file opened last, so with several assets in one DJV the in/out options are left out; choose **One player per asset** to have them on every asset.
+  - **mrv2** (`mrv2`): `{first_file}`; when it opens one asset whose in/out points narrow it, `-inOutRange {first}/{count}/{fps}` is added (mrv2 reads start, number of frames and frame rate). As with DJV, the option is left out when several assets open in one mrv2. The frame rate is the asset's (24 when unknown); a sequence that mrv2 plays at another rate gets shifted in/out points.
+  - **xSTUDIO** (`xstudio`): `{xstudio}`, the sequence with the frames to load (`fire.####.exr=1010-1020`), so in/out points apply to every asset, as with RV. xSTUDIO adds the media to an xSTUDIO that is already running; put `--new-session` in **Arguments before the assets** for a new one each time.
+  - Other players: `{first_file}`.
+- Tokens: `{first_file}`, `{path}` (`####`), `{printf}` (`%04d`), `{rv}`, `{xstudio}`, `{first}`, `{last}`, `{count}` (frames from first to last), `{fps}` (the asset's frame rate, 24 when unknown), `{folder}`, `{name}`. An argument whose tokens are all empty (the frame range of a movie or a still) is left out, together with the option just before it (`-inPoint {first}`).
+
+### Copy assets
+
+**Copy Assets** (category General, in Nuke and standalone) copies the files of assets into one folder. It runs on the main-view selection; it is not offered with nothing selected, so it never copies the whole library. From the collection dropdown it copies the assets selected in the collection panel, or the whole collection when none is selected.
+
+- **Base folder**: in Nuke, the folder of the open script (choose one while the script is unsaved); standalone, choose it (the last one is remembered).
+- **Path template**: the folder all assets go to, relative to the base folder: `.` is the base folder itself, `..` goes one folder up, e.g. `../elements/{date}`. `{date}` is today (YYYYMMDD), `{collection}` the collection name; environment variables are expanded. **Copies to** shows the resulting folder.
+- **Component**: main, highres or proxy. Assets without it are skipped and listed at the end.
+- **A subfolder per file sequence** (on by default): each sequence goes into a folder named after it, without frame number and extension (`fire_v001/fire_v001.1001.exr`). Movies, stills and folders are copied as they are.
+- **Only the frames from in to out**: sequences are copied only within your in/out points (the collection's when run from a collection); assets without in/out points are copied whole.
+- **Existing files**: kept (default) or overwritten.
+- In Nuke, **Create Read nodes** loads the copied footage with its frame range and color space (main and highres), and **Read frame mode** sets each Read's frame mode: left as it is, **start at** the script's start frame, or **expression** with an empty expression.
+
+Everything is checked before copying: every source file must exist, two assets may not land on the same file, and nothing is copied onto itself. Each file is copied under a temporary name and then renamed, so a cancelled or failed copy never leaves a half-written file. Your choices are remembered in your user preferences.
 
 ## Asset properties
 

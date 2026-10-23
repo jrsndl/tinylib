@@ -58,10 +58,16 @@ class Player(QtCore.QObject):
     trim_requested = QtCore.Signal(object, object)  # asset, (in, out) or None
     # asset, step (-1 previous, +1 next), the window asking: PgUp/PgDn in a player window.
     navigate_requested = QtCore.Signal(object, int, object)
+    # asset, QImage, the player window: Set as thumbnail (only offered where thumbnail_allowed says so).
+    thumbnail_requested = QtCore.Signal(object, object, object)
+    # asset, global QPoint, the player window: right-click, for the actions' context menu.
+    context_menu_requested = QtCore.Signal(object, object, object)
 
     def __init__(self, settings, parent=None):
         super().__init__(parent)
         self.settings = settings
+        self.thumbnail_allowed = lambda asset: False  # The browser sets the permission check.
+        self.copy_allowed = lambda asset: True  # Ctrl+C of a frame; the browser sets the permission check.
         self.jobs = set()
         self.windows = set()
         self.replacing = set()  # windows whose next/previous asset is opening; further PgUp/PgDn wait
@@ -144,6 +150,8 @@ class Player(QtCore.QObject):
             self.replacing.discard(window)
             self.finished.emit()
         window.closed.connect(closed)
+        window.context_menu_requested.connect(
+            lambda position, selected=asset, source=window: self.context_menu_requested.emit(selected, position, source))
         replaced = replace is not None and replace in self.windows
         if replaced:
             # PgUp/PgDn keep how you were looking: playing or stopped, flat or sphere, proxy or HDR.
@@ -169,7 +177,12 @@ class Player(QtCore.QObject):
             media = asset.get('proxy') or asset.get('thumb')
             if Path(media).suffix.lower() in ('.jpg', '.jpeg', '.png', '.tif', '.tiff', '.bmp'):
                 asset = dict(asset, kind='still')
-            self.show_window(ReviewPlayer(self.settings, asset, stream), asset, replace)
+            allowed = asset.get('kind') == 'footage' and bool(self.thumbnail_allowed(asset))
+            window = ReviewPlayer(self.settings, asset, stream, can_set_thumbnail=allowed,
+                                  can_copy=bool(self.copy_allowed(asset)))
+            window.thumbnail_requested.connect(
+                lambda image, selected=asset, source=window: self.thumbnail_requested.emit(selected, image, source))
+            self.show_window(window, asset, replace)
             return
         process = QtCore.QProcess(self)
         self.jobs.add(process)
